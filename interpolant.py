@@ -5,7 +5,6 @@ import qmcpy
 class KernelInterpolant:
     """Represents a kernel interpolant on the domain [0, 1]^d.
 
-    NOTE: Should the class be more flexible about it? How can we represent transformations? Or do we let the domain as is and leave trafos to the user?
 
     Attributes:
         kernel : function
@@ -40,7 +39,8 @@ class KernelInterpolant:
         self.dim     = dim
         self.xdesign = xdesign
         self.ydesign = ydesign
-
+        
+        self.condition_number = None
         self.alpha = None
 
 
@@ -79,7 +79,8 @@ class KernelInterpolant:
         """Builds the kernel based interpolant.
         """ 
         K = self.kernel(self.xdesign[:,np.newaxis,:], self.xdesign[np.newaxis,:,:])
-        print(f"Condition number: {np.linalg.cond(K):.2e}")
+        self.condition_number = np.linalg.cond(K)
+        # print(f"Condition number: {self.condition_number:.2e}")
         alpha = np.linalg.solve(K,self.ydesign)
     
         self.alpha = alpha
@@ -147,18 +148,19 @@ class KernelInterpolant:
 
 if __name__ == '__main__':
     print("Running randomised interpolation test case.")
-    from kernels import UnanchoredSobolevKernel
+    from kernels import UnanchoredSobolevKernel, AnchoredSobolevKernel
     from testfunction import TestFunction
 
     # build kernel
     d = 25
-    gamma = [1/j**2 for j in range(1,d+1)]
     Ndesign = 256
-    unanc_sob_kernel = UnanchoredSobolevKernel(d, lengthscales=gamma)
+    weights_decay = 2.5
+    unanc_sob_kernel = UnanchoredSobolevKernel(d, lengthscales=[1/j**weights_decay for j in range(1,d+1)])
+    anc_sob_kernel = AnchoredSobolevKernel(d, lengthscales=[1/j**weights_decay for j in range(1,d+1)])
 
     # construct qmc points
     print("Constructing QMC points.")
-    interpolant = KernelInterpolant(unanc_sob_kernel, d)
+    interpolant = KernelInterpolant(anc_sob_kernel, d)
     
     interpolant.generate_design_points(Ndesign)
 
@@ -173,5 +175,5 @@ if __name__ == '__main__':
     interpolant.build_interpolant()
     k = 11
     qmc_shifts = 5
-    print(f"Error L2: {interpolant.error_L2squared(test_function, Nsamples=2**k, replications=qmc_shifts)}")
+    print(f"Error L2: {interpolant.error_L2squared(test_function, Nsamples=2**k, qmc_shifts=qmc_shifts)}")
     
