@@ -36,12 +36,44 @@ def interpolate(test_function, kernel, Ndesign, num_design_shifts, type_design_p
     return interpolants, errors
 
 
-# example experiment setup
-my_experiment = {'dim_list': [2, 4, 8, 25, 50, 100], 
-                 'Ndesign_list': [16, 32, 64, 128, 256, 512, 1024], 
-                 'num_test_functions': 4, 
-                 'num_anchors': 10, 
-                 'num_design_shifts': 5}
+def run_experiment( kernel_class, 
+                    dim_list, 
+                    Ndesign_list, 
+                    num_test_functions, 
+                    num_anchors, 
+                    num_design_shifts, 
+                    type_design_points, 
+                    weights_decay=2.5,
+                    **kwargs
+                    ):
+    errors = np.zeros((len(dim_list), len(Ndesign_list)))
+    condition_numbers = np.zeros((len(dim_list), len(Ndesign_list)))
+
+    for idx_dim in range(len(dim_list)):
+        dim = dim_list[idx_dim]
+        gamma = [1/j**weights_decay for j in range(1,dim+1)]
+        kernel = kernel_class(dim, lengthscales=gamma)
+        test_function_list = []
+        for i in range(num_test_functions):
+            test_function_list.append(TestFunction(kernel, dim, num_anchors))
+
+        # average over different test functions/problems
+        for idx_Ndesign in range(len(Ndesign_list)):
+            Ndesign = Ndesign_list[idx_Ndesign]
+            error_shift_avg     = []
+            condition_shift_avg = [] # for consistency, we compute an average. 
+                                     # but actually we don't expect the condition number to change with shifts
+            # for every test problem, compute an averaged error over different shifts
+            for test_function in test_function_list:
+                interpolants_design_shifts, errors_design_shifts = interpolate(test_function, kernel, Ndesign, num_design_shifts, type_design_points)
+                error_shift_avg.append(np.sqrt(np.mean(errors_design_shifts)))
+                condition_shift_avg.append(np.mean([interpolants_design_shifts[j].condition_number for j in range(num_design_shifts)]))
+            error_testfun_avg       = np.mean(error_shift_avg)
+            condition_testfun_avg   = np.mean(condition_shift_avg)
+            errors[idx_dim, idx_Ndesign]            = error_testfun_avg
+            condition_numbers[idx_dim, idx_Ndesign] = condition_testfun_avg
+
+    return errors, condition_numbers
 
 
 def write_experiment_data(experiment):
@@ -54,9 +86,7 @@ def write_experiment_data(experiment):
         pickle.dump(experiment, file)
 
 
-def read_experiment_data(experiment):
-    filename = experiment['name']
-    
+def read_experiment_data(filename):
     with open(filename, "rb") as file:
         saved_experiment = pickle.load(file)
     return saved_experiment
@@ -66,60 +96,38 @@ def plot_experiment(experiment):
     # read out setup
     Ndesign_list = np.array(experiment['Ndesign_list'])
     dim_list = experiment['dim_list']
+
     error_data = experiment['error_data']
-    weights_decay = experiment['weights_decay']
+    conditioning_data = experiment['conditioning_data']
+
+    weights_decay = experiment.get('weights_decay', 2.5)
     type_design_points = experiment['type_design_points']
+
+
+    fig, (ax1, ax2) = plt.subplots(1,2)
 
     # errors
     for i in range(error_data.shape[0]):
-        plt.loglog(Ndesign_list, error_data[i,:], 'o-', label=f's={dim_list[i]}')
+        ax1.loglog(Ndesign_list, error_data[i,:], 'o-', label=f's={dim_list[i]}')
     # add N^-1 as reference
-    plt.loglog(Ndesign_list, 1/Ndesign_list, linestyle='--', color='k', label=r'$N^{-1}$')
+    ax1.loglog(Ndesign_list, 1/Ndesign_list, linestyle='--', color='k', label=r'$N^{-1}$')
 
     # condition numbers
-    pass # TODO
+    if conditioning_data is not None:
+        for i in range(error_data.shape[0]):
+            ax2.loglog(Ndesign_list, conditioning_data[i,:], 'o-', label=f's={dim_list[i]}')
 
     # labels and co.
-    plt.xlabel(f'N ({type_design_points} design points)')
-    plt.ylabel('error (shift-average L2)')
-    plt.title(rf'GP/Kernel interpolation errors; $\gamma_j = 1/j^{weights_decay}$')
-    plt.legend()
-    plt.grid()
-    plt.grid(which="minor", color="0.9")
+    ax1.set(xlabel=f'N ({type_design_points} design points)', ylabel='error (shift-average L2)')
+    ax2.set(xlabel=f'N ({type_design_points} design points)', ylabel='condition number (average)')
+    ax1.legend()
+    ax2.legend()
+    ax1.grid()
+    ax2.grid()
+    ax1.grid(which="minor", color="0.9")
+    ax2.grid(which="minor", color="0.9")
+    fig.suptitle(rf'GP/Kernel interpolant; $\gamma_j = 1/j^{{{weights_decay}}}$. Kernel: {experiment['kernel_class'].__name__}')
     plt.show()
-
-
-def run_experiment( kernel_class, 
-                    dim_list, 
-                    Ndesign_list, 
-                    num_test_functions, 
-                    num_anchors, 
-                    num_design_shifts, 
-                    type_design_points, 
-                    **kwargs
-                    ):
-    error_table = np.zeros((len(dim_list), len(Ndesign_list)))
-
-    for idx_dim in range(len(dim_list)):
-        dim = dim_list[idx_dim]
-        gamma = [1/j**2.5 for j in range(1,dim+1)]
-        kernel = kernel_class(dim, lengthscales=gamma)
-        test_function_list = []
-        for i in range(num_test_functions):
-            test_function_list.append(TestFunction(kernel, dim, num_anchors))
-
-        # average over different test functions/problems
-        for idx_Ndesign in range(len(Ndesign_list)):
-            Ndesign = Ndesign_list[idx_Ndesign]
-            error_shift_avg = []
-            # for every test problem, compute an averaged error over different shifts
-            for test_function in test_function_list:
-                _, errors = interpolate(test_function, kernel, Ndesign, num_design_shifts, type_design_points)
-                error_shift_avg.append(np.sqrt(np.mean(errors)))
-            error_testfun_avg = np.mean(error_shift_avg)
-            error_table[idx_dim, idx_Ndesign] = error_testfun_avg
-
-    return error_table
 
 
 
@@ -130,7 +138,7 @@ model_experiment = {
     'Ndesign_list':  [16, 32, 64, 128, 256, 512],
     'num_test_functions':  4,
     'num_anchors':  10,
-    'num_design_shifts':  5,
+    'num_design_shifts':  1,
     'type_design_points':  'lattice',
     'name':  'fast_experiment',
     'error_data':  None,
@@ -140,7 +148,7 @@ model_experiment = {
 
 anchored_experiment = {
     'name': 'anchored_experiment',
-    'dim_list': [50],
+    'dim_list': [4, 25, 50],
     'num_test_functions': 4,
     'num_anchors': 10,
     'Ndesign_list': [16, 32, 64, 128, 256, 512],
@@ -182,28 +190,36 @@ experiment_d100 = {
 
 
 experiment_conditioning = {
+    'name': 'experiment_conditioning',
+
     'kernel_class': UnanchoredSobolevKernel,
-    'dim_list': [25],
-    'Ndesign_list': [16, 32, 64, 128, 256, 512, 1024],
+    'weights_decay':  2.5,
+    'type_design_points': 'lattice',
+    'Ndesign_list': [16, 32, 64, 128, 256, 512],
+    'num_design_shifts': 1,
+    
+    'dim_list': [4, 25, 100],
     'num_test_functions': 1,
     'num_anchors': 10,
-    'num_design_shifts': 1,
-    'type_design_points': 'mc',
-    'name': 'experiment_conditioning',
+
     'error_data': None,
     'conditioning_data': None,
     }
 
 
 experiment_mc = {
+    'name': 'experiment_mc',
+    
     'kernel_class': UnanchoredSobolevKernel,
-    'dim_list': [4, 25, 100],
+    'weights_decay':  2.5,
+    'type_design_points': 'mc',
     'Ndesign_list': [16, 32, 64, 128, 256, 512],
+    'num_design_shifts': 1,
+    
+    'dim_list': [4, 25, 100],
     'num_test_functions': 1,
     'num_anchors': 10,
-    'num_design_shifts': 1,
-    'type_design_points': 'mc',
-    'name': 'experiment_mc',
+    
     'error_data': None,
     'conditioning_data': None,
     }
@@ -211,18 +227,17 @@ experiment_mc = {
 
 if __name__ ==  '__main__':
     # experiment = experiment_d100
-    # experiment = experiment_mc
     experiment = anchored_experiment
+    # experiment = experiment_conditioning
 
-    mode = 'run' # modes: 'run', 'load'
+    mode = 'load'
 
     if mode=='run':
-        error_table = run_experiment(**experiment)
-        print(error_table)
+        error_table, condition_table = run_experiment(**experiment)
         experiment['error_data'] = error_table
+        experiment['conditioning_data'] = condition_table
         write_experiment_data(experiment)
     elif mode=='load':
-        error_table = None
-        error_table = read_experiment_data(experiment)
+        experiment = read_experiment_data(experiment['name'])
 
-    plot_experiment(experiment, error_table)
+    plot_experiment(experiment)
