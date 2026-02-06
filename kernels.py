@@ -73,17 +73,18 @@ class UnanchoredSobolevKernel(AbstractSIDSIKernel):
     
     
     def get_per_dim_components(self, x0, x1, beta0, beta1):
-        if self.npt.any(beta0) or self.npt.any(beta1):
+        npt = self.npt
+        if npt.any(beta0) or npt.any(beta1):
             raise NotImplementedError("Given beta0 or beta1 not None. Derivatives are not implemented.")
         
-        delta = self.npt.abs(x0-x1)
-        kperdim = self.npt.stack([self.npt.concatenate([1/2*bernoulli_poly(2, delta[...,j,None]) + (x0[...,j,None]-1/2)*(x1[...,j,None]-1/2) for j in range(self.d)],-1)],-2)
+        delta = npt.abs(x0-x1)
+        kperdim = npt.stack([npt.concatenate([1/2*bernoulli_poly(2, delta[...,j,None]) + (x0[...,j,None]-1/2)*(x1[...,j,None]-1/2) for j in range(self.d)],-1)],-2)
         return kperdim
 
 
 
 class AnchoredSobolevKernel(AbstractSIDSIKernel):
-    """Represents the reproducing kernel of the weighted unanchored Sobolev space.
+    """Represents the reproducing kernel of the weighted anchored Sobolev space.
 
     Can evaluate the kernel for a given pair of points, dimension, weights, etc.
     The evaluation is vectorised, in a call kernel(x, y) where x, y are matrices
@@ -144,15 +145,67 @@ class AnchoredSobolevKernel(AbstractSIDSIKernel):
         self.anchor = anchor
     
     
-    def eta(self, x0, x1):
+    def compute_eta(self, x0, x1):
+        """
+        Computes eta as in [1, Chapter 4.2] per dimension. 
+        
+        Args:
+            x0: np.array
+            Column vector or scalar
+            
+            x1: np.array
+            Column vector or scalar
+
+        [1] J. Dick, F. Kuo and I. Sloan: High-dimensional integration: The quasi-Monte Carlo way. In: Acta Numerica 22 (2013), pp. 133-288
+        """
         npt = self.npt
         c = self.anchor
-        out = self.npt.zeros_like(x0)
-        both_greater = npt.all([x0 > c, x1 > c], axis=0) # all corresponds to boolean and, any to boolean or
-        both_smaller = npt.all([x0 < c, x1 < c], axis=0)
-        out[both_greater] = self.npt.maximum(x0,x1) - c
-        out[both_smaller] = c - self.npt.minimum(x0,x1)
-        out[not npt.any([both_greater, both_smaller], axis=0)] = 0
+        eta = npt.zeros_like(x0+x1) # have to use the shape that results after broadcasting
+
+        both_greater = npt.logical_and(x0 > c, x1 > c)
+        both_smaller = npt.logical_and(x0 < c, x1 < c)
+
+        eta = npt.where(both_greater, npt.minimum(x0,x1) - c, eta)
+        eta = npt.where(both_smaller, c - npt.maximum(x0,x1), eta)
+
+        return eta
+
+
+    def eta2(self, x0, x1):
+        """
+        Computes eta as in [1, Chapter 4.2] per dimension. 
+        
+        Args:
+            x0: np.array
+            Column vector or scalar
+            
+            x1: np.array
+            Column vector or scalar
+
+        [1] J. Dick, F. Kuo and I. Sloan: High-dimensional integration: The quasi-Monte Carlo way. In: Acta Numerica 22 (2013), pp. 133-288
+        """
+        npt = self.npt
+        c = self.anchor
+        out = npt.zeros_like(x0+x1) # have to use the shape that results after broadcasting
+
+        both_greater = npt.logical_and(x0 > c, x1 > c)
+        both_smaller = npt.logical_and(x0 < c, x1 < c)
+
+        # we distinguish between cases because broadcasting interferes the indexing
+        if x0.shape == x1.shape:
+            out[both_greater] =     npt.minimum(x0[both_greater],x1[both_greater]) - c
+            out[both_smaller] = c - npt.maximum(x0[both_smaller],x1[both_smaller])
+        elif x0.shape != out.shape: # x0 gets broadcast
+            # we can and do make assumptions about the shapes here. 
+            # eta is computed per dimension, so x0 and x1 have shape (num_pts,1) or (1,) (maybe also (1,1)). 
+            # broadcasting only happens when a shape entry is one, so in that case we can assume having shape (1,) for the broadcast array
+            out[both_greater] =     npt.minimum(x0[npt.any(both_greater), None], x1[both_greater]) - c
+            out[both_smaller] = c - npt.maximum(x0[npt.any(both_smaller), None], x1[both_smaller])
+        elif x1.shape != out.shape: # x1 gets broadcast
+            out[both_greater] =     npt.minimum(x0[both_greater], x1[[npt.any(both_greater)]]) - c
+            out[both_smaller] = c - npt.maximum(x0[both_smaller], x1[[npt.any(both_smaller)]])
+        
+        out[~npt.logical_or(both_greater, both_smaller)] = 0
         
         return out
 
@@ -161,15 +214,33 @@ class AnchoredSobolevKernel(AbstractSIDSIKernel):
         if self.npt.any(beta0) or self.npt.any(beta1):
             raise NotImplementedError("Given beta0 or beta1 not None. Derivatives are not implemented.")
         
-        kperdim = self.npt.stack([self.npt.concatenate([  self.eta(x0[...,j,None],x1[...,j,None]) for j in range(self.d)],-1)],-2)
+        kperdim = self.npt.stack([self.npt.concatenate([  self.compute_eta(x0[..., j, None], x1[..., j, None]) for j in range(self.d)],-1)],-2)
         return kperdim
-
 
 
 
 if __name__ == '__main__':
     import numpy as np
 
+    dim = 10
+    UnancSobolevKernel = UnanchoredSobolevKernel(dim, lengthscales=[1/j**2 for j in range(1,dim+1)])
+    rng = np.random.default_rng()
+    x_array = rng.uniform(0, 1, size=(3, dim))
+    kmat = UnancSobolevKernel(x_array, x_array)
+
+
+    dim = 1
+    AncSobolevKernel = AnchoredSobolevKernel(dim, anchor=0, lengthscales=[1/j**2 for j in range(1,dim+1)])
+    k = AncSobolevKernel(np.array([0.001]),np.array([0.4]))
+
+    dim = 10
+    AncSobolevKernel = AnchoredSobolevKernel(dim, anchor=0, lengthscales=[1/j**2 for j in range(1,dim+1)])
+    rng = np.random.default_rng()
+    x_array = rng.uniform(0, 1, size=(3, dim))
+    kvec = AncSobolevKernel(x_array, x_array[0,:])
+
+
+    # test against more manual calculations
     def manualCalc_unanc(x0, x1, gamma=[1.0, 1.0]):
         # evaluation of unanchored sobolev kernel, d=2 and weights as given
         gamma1 = gamma[0]
@@ -181,18 +252,10 @@ if __name__ == '__main__':
 
         k = (1+gamma1*eta1)*(1+gamma2*eta2)
         return k[0]
-    
+
     def manualCalc_anc(x0, x1, gamma=[1.0, 1.0]):
         # evaluation of anchored sobolev kernel with anchor c=0, dimension d=2 and weights as given
         return (1+gamma[0]*np.minimum(x0[0], x1[0]))*(1+gamma[1]*np.minimum(x0[1], x1[1]))
-    
-    # scribble
-    x0 = np.array(([0.0, 0.5], [0.5, 0.5]))
-    x1 = np.array(([0.0, 0.5], [0.0, 0.0]))
-    gamma = [1.0, 2.0]
-    UnancSobolevKernel = UnanchoredSobolevKernel(2, lengthscales=gamma)
-    kmat = UnancSobolevKernel(x0, x1)
-
 
     x0 = np.array([0.0, 0.5])
     x1 = np.array([0.0, 0.5])
