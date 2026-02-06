@@ -49,7 +49,7 @@ class TestFunction():
             Dimensionality of the function
 
             anchors : np.array
-            One column corresponds to one anchor.
+            One row corresponds to one anchor.
 
             num_anchors : int
             Number of anchors and hence of anchored kernel functions.
@@ -76,7 +76,7 @@ class TestFunction():
         """
         rng = np.random.default_rng()
 
-        self.anchors = rng.uniform(0, 1, size=(dim, num_anchors))
+        self.anchors = rng.uniform(0, 1, size=(num_anchors, dim))
         self.coefficients = rng.normal(size=num_anchors)
 
 
@@ -87,7 +87,7 @@ class TestFunction():
         kernel = self.kernel
         for i in range(self.num_anchors):
             for j in range(self.num_anchors):
-                norm_squared += coefficients[i]*coefficients[j]*kernel(anchors[:,i], anchors[:,j])
+                norm_squared += coefficients[i]*coefficients[j]*kernel(anchors[i,:], anchors[j,:])
 
         return np.sqrt(norm_squared)
 
@@ -110,7 +110,7 @@ class TestFunction():
 
         values = np.zeros((num_inputs, num_anchors))
         for i in range(num_anchors):
-            values[:,i] = self.kernel(x, anchors[:,i])
+            values[:,i] = self.kernel(x, anchors[i,:])
 
         return np.dot(values, coefficients)
 
@@ -119,24 +119,33 @@ class TestFunction():
 if __name__ == '__main__':
     # visuals
     import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d import Axes3D
     from matplotlib.tri import Triangulation
     # kernel
-    from kernels import UnanchoredSobolevKernel
-    def buildTestFunction(num_anchors=10):
-        kernel = UnanchoredSobolevKernel(2, lengthscales=[1, 0.5])
-        return TestFunction(kernel, 2, num_anchors)
+    from kernels import UnanchoredSobolevKernel, AnchoredSobolevKernel
 
-    # build test function
-    print("Testing: TestFunction.")
-    print("Building kernel-based test function.")
-    test_function = buildTestFunction(num_anchors=2)
+    def buildTestFunction(kernel_class, dim=2, lengthscales=[1, 0.5], num_anchors=10):
+        kernel = kernel_class(dim, lengthscales=lengthscales)
+        return TestFunction(kernel, dim, num_anchors)
+
+    dim = 2
+    lengthscales=[1, 0.5]
+    
+    # build test function with unanchored kernel
+    print(f"Building test function based on {UnanchoredSobolevKernel.__name__}.")
+    test_function = buildTestFunction(UnanchoredSobolevKernel, dim, lengthscales, num_anchors=2)
     print("Done.")
+
+
+    # build test function with unanchored kernel
+    print(f"Building test function based on {AnchoredSobolevKernel.__name__}.")
+    test_function = buildTestFunction(AnchoredSobolevKernel, dim, lengthscales, num_anchors=2)
+    print("Done.")
+
 
     # visualise
     nx, ny = (101, 101)
-    X = np.linspace(-0.5, 0.5, nx)
-    Y = np.linspace(-0.5, 0.5, ny)
+    X = np.linspace(0, 1, nx)
+    Y = np.linspace(0, 1, ny)
     xv, yv = np.meshgrid(X, Y)
     xv = xv.flatten() # put the coordinates into a long, thin matrix
     yv = yv.flatten()
@@ -154,4 +163,16 @@ if __name__ == '__main__':
     ax.set_ylabel("y")
     ax.set_zlabel("sin(x*y)")
 
+    plt.show()
+
+
+    # 1d test
+    kernel_class = AnchoredSobolevKernel
+    print(f"Building test function based on {kernel_class.__name__}.")
+    test_function = buildTestFunction(kernel_class, dim=1, lengthscales=[1], num_anchors=2)
+    
+    X = np.linspace(0,1, 1000)
+    Y = test_function(X[:,None])
+    ax = plt.plot(X, Y)
+    plt.title(f"Test function based on {kernel_class.__name__}")
     plt.show()
