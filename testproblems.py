@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.integrate import solve_bvp, quad
 
 
 class TestFunction():
@@ -114,6 +115,66 @@ class TestFunction():
 
         return np.dot(values, coefficients)
 
+
+
+class EllipticProblem():
+    def __init__(self, dim, f = lambda x: np.zeros_like(x), q=4/3):
+        self.dim = dim
+        self.f = f
+        self.q = q
+
+
+    def a(self, x, y):
+        q = self.q
+        pi = np.pi
+        
+        result = np.ones_like(x)
+        for j in range(self.dim):
+            result += y[j]/(1+(j*pi)**q)*np.sin(j*pi*x)
+        return result
+
+
+    def dx_a(self, x, y):
+        q = self.q
+        pi = np.pi
+        
+        result = np.zeros_like(x)
+        for j in range(self.dim):
+            result += y[j]*j*pi/(1+(j*pi)**q)*np.cos(j*pi*x)
+        return result
+
+
+    def solve_elliptic_bvp(self, y, Nx = 2):
+        def rhs(x, u):
+            u0 = u[[1]]
+            u1 = (self.f(x) - self.dx_a(x,y))/self.a(x,y)
+            return np.vstack((u0, u1))
+
+        def bc(ya, yb):
+            return np.array([ya[0], yb[0]])
+            
+        # mesh and initial guess
+        x = np.linspace(0, 1, num=Nx)
+        u = np.zeros((2,Nx))
+
+        return solve_bvp(rhs, bc, x, u)
+
+
+    def __call__(self, y):
+        if y.ndim == 1:
+            y_rows = 1
+            y_cols = y.shape[0]
+        elif y.ndim==2:
+            y_rows, y_cols = y.shape
+        assert y_cols == self.dim
+        
+        qoi = np.zeros(y_rows) # quantity of interest
+        for row in range(y_rows):
+            solobj = self.solve_elliptic_bvp(y[row,:])
+            u_sol = lambda x: solobj.sol(x)[0]
+            qoi[row] = quad(u_sol, a=1/8, b=3/8)[0]
+
+        return qoi
 
 
 if __name__ == '__main__':

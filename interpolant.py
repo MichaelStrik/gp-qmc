@@ -109,7 +109,7 @@ class KernelInterpolant:
         return yeval
 
 
-    def error_L2squared(self, target, Nsamples, method='lattice', qmc_shifts=1, **kwargs):
+    def error_L2squared(self, target, Nsamples, method='lattice', qmc_shifts=1, normalisation=None, **kwargs):
         """Returns an approximation to the L2-error of the interpolant w.r.t. target.
         Args:
             target : function(x)
@@ -126,8 +126,10 @@ class KernelInterpolant:
         if method == 'mc':
             rng = np.random.default_rng()
             sample_points = rng.uniform(0, 1, size=(Nsamples, self.dim))
-            d = self(sample_points) - target(sample_points)
+            target_eval = target(sample_points)
+            d = self(sample_points) - target_eval
             abserror_squared = np.sum(d**2)/Nsamples
+            L2norm_squared = np.sum(target_eval**2)/Nsamples
 
         elif method == 'lattice' or method == 'digital_net':
             qmcGens = {'lattice': qmcpy.Lattice, 'digital_net': qmcpy.DigitalNetB2}
@@ -137,19 +139,24 @@ class KernelInterpolant:
             Q_s = np.zeros(qmc_shifts)
             for r in range(qmc_shifts):
                 point_set = shifted_point_sets[r,:,:]
-                d = self(point_set) - target(point_set)
+                target_eval = target(point_set)
+                d = self(point_set) - target_eval
                 Q_s[r] = np.sum(d**2)/Nsamples
+                L2norm_squared = np.sum(target_eval**2)/Nsamples
             # average over shifted qmc rules
             abserror_squared = np.mean(Q_s)
+        
+        if normalisation is None:
+            normalisation = L2norm_squared
 
-        return abserror_squared
+        return abserror_squared/normalisation
 
 
 
 if __name__ == '__main__':
     print("Running randomised interpolation test case.")
     from kernels import UnanchoredSobolevKernel, AnchoredSobolevKernel
-    from testfunction import TestFunction
+    from testproblems import TestFunction
 
     # build kernel
     d = 25
