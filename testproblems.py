@@ -144,7 +144,7 @@ class EllipticProblem():
         return result
 
 
-    def solve_elliptic_bvp(self, y, Nx = 2):
+    def solve_elliptic_bvp(self, y, Nx = 2, tol=1e-5):
         def rhs(x, u):
             u0 = u[[1]]
             u1 = (self.f(x) - self.dx_a(x,y))/self.a(x,y)
@@ -157,7 +157,7 @@ class EllipticProblem():
         x = np.linspace(0, 1, num=Nx)
         u = np.zeros((2,Nx))
 
-        return solve_bvp(rhs, bc, x, u)
+        return solve_bvp(rhs, bc, x, u, tol=tol)
 
 
     def __call__(self, y):
