@@ -54,7 +54,7 @@ if __name__ ==  '__main__':
     args = parser.parse_args()
 
     plot_function = locals().get(args.plot_fun)
-    with open(args.exp_obj, 'r') as file:
+    with open(args.exp_obj, 'rb') as file:
         experiment_object = pickle.load(file)
     
     experiment_object = read_experiment_data(experiment_object['name'])
