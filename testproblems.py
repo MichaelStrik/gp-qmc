@@ -162,8 +162,9 @@ class EllipticProblem():
 
     def __call__(self, y):
         if y.ndim == 1:
+            y = y[np.newaxis,:]
             y_rows = 1
-            y_cols = y.shape[0]
+            y_cols = y.shape[1]
         elif y.ndim==2:
             y_rows, y_cols = y.shape
         assert y_cols == self.dim
