@@ -1,6 +1,7 @@
 import numpy as np
 import qmcpy
 from multiprocess import Process, Queue
+from os import cpu_count
 
 from numbers import Number
 
@@ -155,7 +156,7 @@ class KernelInterpolant:
             self_eval = self(pts)
             d = target_eval - self_eval
             return np.sum(d**2), np.sum(target_eval**2)
-        N_PROCESSES = 8
+        N_PROCESSES = cpu_count()
         task_queue = Queue()
         done_queue = Queue()
         for r in range(qmc_shifts):
