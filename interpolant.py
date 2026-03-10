@@ -1,5 +1,6 @@
 import numpy as np
 import qmcpy
+from multiprocessing import Pool
 
 from numbers import Number
 
@@ -125,28 +126,35 @@ class KernelInterpolant:
         """
         method = method.lower()
         assert method in ['mc', 'lattice', 'digital_net']
+        
         if method == 'mc':
             rng = np.random.default_rng()
-            sample_points = rng.uniform(0, 1, size=(Nsamples, self.dim))
-            target_eval = target(sample_points)
-            d = self(sample_points) - target_eval
-            abserror_squared = np.sum(d**2)/Nsamples
-            L2norm_squared = np.sum(target_eval**2)/Nsamples
-
+            point_sets = rng.uniform(0, 1, size=(Nsamples, self.dim))
+            point_sets = point_sets[np.newaxis,:,:]
+            qmc_shifts = 1
+            # target_eval = target(point_set)
+            # d = self(point_set) - target_eval
+            # abserror_squared = np.sum(d**2)/Nsamples
+            # L2norm_squared = np.sum(target_eval**2)/Nsamples
+        # qmc
         elif method == 'lattice' or method == 'digital_net':
             qmcGens = {'lattice': qmcpy.Lattice, 'digital_net': qmcpy.DigitalNetB2}
             qmcGen = qmcGens[method](dimension=self.dim, replications=qmc_shifts, **kwargs)
-            shifted_point_sets = qmcGen(Nsamples, warn=False)
-            # compute the shifted qmc estimators
-            Q_s = np.zeros(qmc_shifts)
-            for r in range(qmc_shifts):
-                point_set = shifted_point_sets[r,:,:]
-                target_eval = target(point_set)
-                d = self(point_set) - target_eval
-                Q_s[r] = np.sum(d**2)/Nsamples
-                L2norm_squared = np.sum(target_eval**2)/Nsamples
-            # average over shifted qmc rules
-            abserror_squared = np.mean(Q_s)
+            point_sets = qmcGen(Nsamples, warn=False)
+        
+        # shift-average qmc estimator
+        Q_s = np.zeros(qmc_shifts)
+        for r in range(qmc_shifts):
+            points = point_sets[r,:,:]
+            with Pool as pool:
+                calc_target_eval = lambda points: target(points)
+                target_eval = pool.map(calc_target_eval, points)
+                calc_d = lambda points, target_eval: self(points) - target_eval
+                d = pool.starmap(calc_d, zip(points, target_eval))
+            
+            Q_s[r] = np.sum(d**2)/Nsamples
+            L2norm_squared = np.sum(target_eval**2)/Nsamples
+        abserror_squared = np.mean(Q_s)
         
         if type(normalisation) is str and normalisation.upper() == 'L2':
             normalisation = L2norm_squared
