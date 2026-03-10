@@ -1,6 +1,6 @@
 import numpy as np
 import qmcpy
-from multiprocessing import Pool
+from multiprocess import Process, Queue
 
 from numbers import Number
 
@@ -144,16 +144,36 @@ class KernelInterpolant:
         
         # shift-average qmc estimator
         Q_s = np.zeros(qmc_shifts)
+        L2norm_squared = 0
+        # parallelisation helpers
+        def worker(input, output):
+            for func, args in iter(input.get, 'STOP'):
+                result = func(*args)
+                output.put(result)
+        def calc_d(pts):
+            target_eval = target(pts)
+            self_eval = self(pts)
+            d = target_eval - self_eval
+            return np.sum(d**2), np.sum(target_eval**2)
+        N_PROCESSES = 8
+        task_queue = Queue()
+        done_queue = Queue()
         for r in range(qmc_shifts):
             points = point_sets[r,:,:]
-            with Pool as pool:
-                calc_target_eval = lambda points: target(points)
-                target_eval = pool.map(calc_target_eval, points)
-                calc_d = lambda points, target_eval: self(points) - target_eval
-                d = pool.starmap(calc_d, zip(points, target_eval))
-            
-            Q_s[r] = np.sum(d**2)/Nsamples
-            L2norm_squared = np.sum(target_eval**2)/Nsamples
+            points_subviews = np.array_split(points, N_PROCESSES)
+            TASKS = [(calc_d, (pts,)) for pts in points_subviews]
+            for task in TASKS:
+                task_queue.put(task)
+            for i in range(N_PROCESSES):
+                Process(target=worker, args=(task_queue, done_queue)).start()
+            for i in range(len(TASKS)):
+                d_squared, target_eval_squared = done_queue.get()
+                Q_s[r] += d_squared
+                L2norm_squared += target_eval_squared
+            for i in range(N_PROCESSES):
+                task_queue.put('STOP')
+            Q_s[r] /= Nsamples
+            L2norm_squared /= Nsamples
         abserror_squared = np.mean(Q_s)
         
         if type(normalisation) is str and normalisation.upper() == 'L2':
