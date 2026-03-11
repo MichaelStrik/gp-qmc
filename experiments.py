@@ -5,6 +5,8 @@ from kernels import UnanchoredSobolevKernel, AnchoredSobolevKernel
 from interpolant import KernelInterpolant
 from testproblems import TestFunction, EllipticProblem
 
+from numbers import Number
+
 
 def interpolate(test_function, kernel, Ndesign, num_design_shifts, type_design_points='lattice'):
     dim = kernel.d
@@ -32,11 +34,10 @@ def interpolate(test_function, kernel, Ndesign, num_design_shifts, type_design_p
 
         # build interpolant and approximate error
         interpolant.build_interpolant()
-        errors[shift] = interpolant.error_L2squared(test_function, Nsamples=2**k, qmc_shifts=num_error_shifts, normalisation=test_function_norm) # TODO Is normalisation by the the squared norm more appropriate?
+        errors[shift] = interpolant.error_L2squared(test_function, Nsamples=2**k, qmc_shifts=num_error_shifts, normalisation=test_function_norm) # TODO Is normalisation by the squared norm more appropriate?
         interpolants.append(interpolant)
 
     return interpolants, errors
-
 
 def run_bvp_experiment( kernel_class,
                     dim_list,
@@ -46,20 +47,27 @@ def run_bvp_experiment( kernel_class,
                     weights_decay=2.5,
                     **kwargs
                     ):
+    """
+    weights_decay: Number or tuple of two numbers, in which case the first number specifies the decay of weights in the problem and the second the decay in the method.
+    """
     errors = np.zeros((len(dim_list), len(Ndesign_list)))
     condition_numbers = np.zeros((len(dim_list), len(Ndesign_list)))
 
+    if isinstance(weights_decay, Number):
+        weights_decay = (weights_decay, weights_decay)
+    elif type(weights_decay) is not tuple:
+        TypeError('weights_decay has to be either a number or a tuple of two numbers')
 
     for idx_dim in range(len(dim_list)):
         dim = dim_list[idx_dim]
         print(f"Dimension {dim}")
-        gamma = [1/j**weights_decay for j in range(1,dim+1)]
+        gamma = [1/j**weights_decay[1] for j in range(1,dim+1)]
         kernel = kernel_class(dim, lengthscales=gamma)
 
-        elliptic_bvp = EllipticProblem(dim, q=weights_decay)
+        elliptic_bvp = EllipticProblem(dim, q=weights_decay[0])
         for idx_Ndesign in range(len(Ndesign_list)):
             Ndesign = Ndesign_list[idx_Ndesign]
-            print(f"    Ndesign {Ndesign}")
+            print(f"\tNdesign {Ndesign}")
             interpolants_design_shifts, errors_design_shifts = interpolate(elliptic_bvp, kernel, Ndesign, num_design_shifts, type_design_points)
             errors[idx_dim, idx_Ndesign]            = np.sqrt(np.mean(errors_design_shifts)) # shift-average error
             condition_numbers[idx_dim, idx_Ndesign] = np.mean([interpolants_design_shifts[j].condition_number for j in range(num_design_shifts)]) # shift-average condition number
