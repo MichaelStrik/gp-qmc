@@ -1,6 +1,8 @@
 import numpy as np
 import qmcpy
 
+from numbers import Number
+
 
 class KernelInterpolant:
     """Represents a kernel interpolant on the domain [0, 1]^d.
@@ -146,8 +148,10 @@ class KernelInterpolant:
             # average over shifted qmc rules
             abserror_squared = np.mean(Q_s)
         
-        if normalisation is None:
+        if type(normalisation) is str and normalisation.upper() == 'L2':
             normalisation = L2norm_squared
+        elif not isinstance(normalisation, Number):
+            normalisation = 1
 
         return abserror_squared/normalisation
 
