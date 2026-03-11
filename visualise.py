@@ -57,5 +57,4 @@ if __name__ ==  '__main__':
     with open(args.exp_obj, 'rb') as file:
         experiment_object = pickle.load(file)
     
-    experiment_object = read_experiment_data(experiment_object['name'])
-    plot_experiment(experiment_object)
+    plot_function(experiment_object)
