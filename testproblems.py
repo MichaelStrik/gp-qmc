@@ -1,5 +1,7 @@
 import numpy as np
 from scipy.integrate import solve_bvp, quad
+from multiprocess import Process, Queue
+from os import cpu_count
 
 
 class TestFunction():
@@ -170,10 +172,35 @@ class EllipticProblem():
         assert y_cols == self.dim
         
         qoi = np.zeros(y_rows) # quantity of interest
-        for row in range(y_rows):
-            solobj = self.solve_elliptic_bvp(y[row,:])
+
+        # parallelisation helpers
+        def worker(input, output):
+            for func, args in iter(input.get, 'STOP'):
+                result = func(*args)
+                output.put(result)
+        def calc_qoi(y_row, idx):
+            solobj = self.solve_elliptic_bvp(y_row)
             u_sol = lambda x: solobj.sol(x)[0]
-            qoi[row] = quad(u_sol, a=1/8, b=3/8)[0]
+            res = quad(u_sol, a=1/8, b=3/8)[0]
+            return res, idx
+        N_PROCESSES = cpu_count()
+        task_queue = Queue()
+        done_queue = Queue()
+        TASKS = [(calc_qoi, (y[row,:], row)) for row in range(y_rows)]
+        for task in TASKS:
+            task_queue.put(task)
+        for i in range(N_PROCESSES):
+            Process(target=worker, args=(task_queue, done_queue)).start()
+        for i in range(len(TASKS)):
+            res, idx = done_queue.get()
+            qoi[idx] = res
+        for i in range(N_PROCESSES):
+            task_queue.put('STOP')
+
+        # for row in range(y_rows):
+        #     solobj = self.solve_elliptic_bvp(y[row,:])
+        #     u_sol = lambda x: solobj.sol(x)[0]
+        #     qoi[row] = quad(u_sol, a=1/8, b=3/8)[0]
 
         return qoi
 

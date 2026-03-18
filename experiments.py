@@ -55,8 +55,8 @@ def run_bvp_experiment( kernel_class,
 
     if isinstance(weights_decay, Number):
         weights_decay = (weights_decay, weights_decay)
-    elif type(weights_decay) is not tuple:
-        TypeError('weights_decay has to be either a number or a tuple of two numbers')
+    elif type(weights_decay) not in [tuple, list, np.array]:
+        TypeError('weights_decay has to be a number or a tuple/list/np.array of two numbers')
 
     for idx_dim in range(len(dim_list)):
         dim = dim_list[idx_dim]
