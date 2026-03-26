@@ -39,6 +39,7 @@ def interpolate(test_function, kernel, Ndesign, num_design_shifts, type_design_p
 
     return interpolants, errors
 
+
 def run_bvp_experiment( kernel_class,
                     dim_list,
                     Ndesign_list,
@@ -58,15 +59,13 @@ def run_bvp_experiment( kernel_class,
     elif type(weights_decay) not in [tuple, list, np.array]:
         TypeError('weights_decay has to be a number or a tuple/list/np.array of two numbers')
 
-    for idx_dim in range(len(dim_list)):
-        dim = dim_list[idx_dim]
+    for idx_dim, dim in enumerate(dim_list):
         print(f"Dimension {dim}")
         gamma = [1/j**weights_decay[1] for j in range(1,dim+1)]
         kernel = kernel_class(dim, lengthscales=gamma)
 
         elliptic_bvp = EllipticProblem(dim, q=weights_decay[0])
-        for idx_Ndesign in range(len(Ndesign_list)):
-            Ndesign = Ndesign_list[idx_Ndesign]
+        for idx_Ndesign, Ndesign in enumerate(Ndesign_list):
             print(f"\tNdesign {Ndesign}")
             interpolants_design_shifts, errors_design_shifts = interpolate(elliptic_bvp, kernel, Ndesign, num_design_shifts, type_design_points)
             errors[idx_dim, idx_Ndesign]            = np.sqrt(np.mean(errors_design_shifts)) # shift-average error
@@ -88,8 +87,7 @@ def run_experiment( kernel_class,
     errors = np.zeros((len(dim_list), len(Ndesign_list)))
     condition_numbers = np.zeros((len(dim_list), len(Ndesign_list)))
 
-    for idx_dim in range(len(dim_list)):
-        dim = dim_list[idx_dim]
+    for idx_dim, dim in enumerate(dim_list):
         gamma = [1/j**weights_decay for j in range(1,dim+1)]
         kernel = kernel_class(dim, lengthscales=gamma)
         test_function_list = []
@@ -97,8 +95,7 @@ def run_experiment( kernel_class,
             test_function_list.append(TestFunction(kernel, dim, num_anchors))
 
         # average over different test functions/problems
-        for idx_Ndesign in range(len(Ndesign_list)):
-            Ndesign = Ndesign_list[idx_Ndesign]
+        for idx_Ndesign, Ndesign in enumerate(Ndesign_list):    
             error_shift_avg     = []
             condition_shift_avg = [] # for consistency, we compute an average. 
                                      # but actually we don't expect the condition number to change with shifts
@@ -111,6 +108,28 @@ def run_experiment( kernel_class,
             condition_testfun_avg   = np.mean(condition_shift_avg)
             errors[idx_dim, idx_Ndesign]            = error_testfun_avg
             condition_numbers[idx_dim, idx_Ndesign] = condition_testfun_avg
+
+    return errors, condition_numbers
+
+
+def run_condition_experiment(kernel_class, dim_list, Ndesign_list, num_design_shifts, type_design_points, weights_decay=2.5, **kwargs):
+    condition_numbers = np.zeros((len(dim_list), len(Ndesign_list)))
+
+    for idx_dim, dim in enumerate(dim_list):
+        print(f"Dimension {dim}")
+
+        for idx_Ndesign, Ndesign in enumerate(Ndesign_list):
+            print(f"\tNdesign {Ndesign}")
+            gamma = [1/j**weights_decay for j in range(1,dim+1)]
+            kernel = kernel_class(dim, lengthscales=gamma)
+
+            interpolant = KernelInterpolant(kernel, dim)
+            interpolant.generate_design_points(Ndesign, method=type_design_points)
+            K = interpolant.kernel(interpolant.xdesign[:,np.newaxis,:], interpolant.xdesign[np.newaxis,:,:])
+            condition_numbers[idx_dim, idx_Ndesign] = np.linalg.cond(K)
+            # print(f"Condition number: {interpolant.condition_number}")
+    
+    errors = []
 
     return errors, condition_numbers
 
