@@ -2,6 +2,103 @@
 from qmcpy.kernel.si_dsi_kernels import AbstractSIDSIKernel
 from qmcpy.util.shift_invar_ops import bernoulli_poly
 from qmcpy.util.transforms import tf_exp_eps,tf_exp_eps_inv
+import numpy as np
+
+
+class AbstractWeightedKernel():
+    """
+    Abstract class for kernels with product weights or with product and order dependent (POD) weights. 
+    For the product case, one only needs to specify weights for each individual dimension (dimension_weights),
+    whereas for the POD case, there should also be specified weights for every order (cardinality of a set of dimensions).
+    The type of weights will be inferred automatically from he datatype of order_weights.
+    """
+    def __init__(self,
+                d,
+                scale = 1.,
+                dimension_weights = 1.,
+                order_weights = 1.
+                ):
+        self.d = d
+        self.scale = scale
+        self.dimension_weights = dimension_weights
+        self.order_weights = order_weights
+        self.P_table = None
+
+
+    def eta(self,x,y):
+        raise NotImplementedError
+
+
+    # PRODUCT WEIGHTS
+    def get_per_dim_components(self, x0, x1):
+        kperdim = np.stack([self.eta(x0[...,j], x1[...,j]) for j in range(self.d)],-1)
+        return kperdim
+    
+
+    def combine_per_dim_components(self, kperdim):
+        scale = self.scale
+        weights = self.dimension_weights
+        k = scale * ((1+weights*kperdim).prod(-1))
+        return k
+    
+
+    # POD WEIGHTS
+    def P(self,x0,x1,s,l):
+        if l > s:
+            return 0
+        elif l == 0:
+            return 1
+        else:
+            if not np.any(np.isnan(self.P_table[s,l,...])):
+                return self.P_table[s,l,...]
+            P = self.P(x0,x1,s-1,l) + self.dimension_weights[s-1]*self.eta(x0[...,s-1],x1[...,s-1])*self.P(x0,x1,s-1,l-1)
+            self.P_table[s,l,...] = P
+            return P
+        
+    
+    def sum_P(self,x0,x1):
+        d = self.d
+        order_weights = self.order_weights
+        # allocate P_table
+        if x0.ndim==3 and x1.ndim==3:
+            n = np.max(x0.shape[:-1])
+            m = np.max(x1.shape[:-1])
+            # we need to predict the output shape
+            # the last shape entry is the dimensionality of the input points/of the kernel and doesn't matter
+            # if ndim==3, we assume shapes of the form (n,1,d) or (1,n,d) for a broadcasted calculation, with n>=1 being the number of points
+            self.P_table = np.nan*np.ones((d+1,d+1,n,m))
+        elif x0.ndim==2 and x1.ndim==2:
+            # in this case, x0 and x1 are matrices where two rows of the same index form a pair of points, therefore they should have the same amount of rows
+            n = x0.shape[0]
+            m = x1.shape[0]
+            assert n == m
+            self.P_table = np.nan*np.ones((d+1,d+1,n))
+        elif x0.ndim==1 and x1.ndim==1:
+            self.P_table = np.nan*np.ones((d+1,d+1))
+        else:
+            raise TypeError("Shapes not compatible.")
+        
+        k = 0
+        scale = self.scale
+        for l in range(d+1):
+            k += scale*order_weights[l]*self.P(x0,x1,d,l)
+        self.P_table = None
+
+        return k
+
+
+    def __call__(self, x0, x1):
+        # assertions
+        # TODO
+
+        if np.isscalar(self.order_weights):
+            # product weights
+            kperdim = self.get_per_dim_components(x0,x1)
+            k = self.combine_per_dim_components(kperdim)
+            return k
+        else:
+            # product and order dependent (POD) weights
+            return self.sum_P(x0,x1)
 
 
 class UnanchoredSobolevKernel(AbstractSIDSIKernel):
@@ -272,3 +369,48 @@ if __name__ == '__main__':
     AncSobolevKernel = AnchoredSobolevKernel(2, anchor=0, lengthscales=gamma)
     print("Testing: AnchoredSobolevKernel.")
     print(f"Error: {AncSobolevKernel(x0, x1) - manualCalc_anc(x0, x1, gamma)}")
+
+    print("----\nKernel reimplementation")
+    def test(kernel):
+        x = np.array([0.0,2.0])
+        y = np.array([3.0,4.0])
+        z = np.array([6.0,9.0])
+        print(f"k(x,y)={kernel(x,y)}")
+        print(f"k(y,z)={kernel(y,z)}")
+        print(f"k(x,z)={kernel(x,z)}")
+        print(f"k(x,x)={kernel(x,x)}")
+        print(f"k(y,y)={kernel(y,y)}")
+        print(f"k(z,z)={kernel(z,z)}")
+        S = np.stack([x,y,z])
+        print(kernel(S[:,np.newaxis,:], S[np.newaxis,:,:]))
+        # print(S[:,np.newaxis,:].shape, S[np.newaxis,:,:].shape)
+        # print(S[:,np.newaxis,:].ndim)
+
+    kernelOld = UnanchoredSobolevKernel(d=2, lengthscales=[1,2])
+    test(kernelOld)
+
+    print("\n----"+"\nNew weighted kernel")
+    class PODWeightsUnanchoredSobolevKernel(AbstractWeightedKernel):
+        def eta(self,x0,x1):
+            # one-dimensional for now, without broadcasting
+            return 1/2*(np.abs(x0-x1)**2 -np.abs(x0-x1) +1/6) +(x0-1/2)*(x1-1/2)
+
+    kernel = PODWeightsUnanchoredSobolevKernel(d=2, dimension_weights=[1,2])
+    test(kernel)
+
+    # print("Step by step")
+    # x0 = np.array([0.0,0.0])
+    # x1 = np.array([1.0,1.0])
+    # kperdim = kernel.get_per_dim_components(x0,x1)
+    # kperdimOld = kernelOld.get_per_dim_components(x0,x1,[],[])
+    # print(f"kperdim = {kperdim}, kperdimOld = {kperdimOld}")
+    # weights = kernel.dimension_weights
+    # print(f"Manually: {(1+weights*kperdim).prod(-1)}")
+    # print(f"Kernel: {kernel(x0,x1)}")
+    # kernelOld(x0,x1)
+
+    # def etaOld(x,y):
+    #     delta = np.array(np.abs(x-y))
+    #     return 1/2*bernoulli_poly(2, delta) + (x-1/2)*(y-1/2)
+    # print(f"Etas: {etaOld(0,1),kernel.eta(0,1)}")
+    # bernoulli_poly(2,np.array(3.0))
