@@ -1,7 +1,9 @@
 import numpy as np
 from scipy.integrate import solve_bvp, quad
+# parallel
 from multiprocess import Process, Queue
 from os import cpu_count
+from utils import worker
 
 
 class TestFunction():
@@ -119,13 +121,14 @@ class TestFunction():
 
 
 
-class EllipticProblem():
+class EllipticProblemQOI():
     def __init__(self, dim, f = lambda x: np.zeros_like(x), q=4/3):
         self.dim = dim
         self.f = f
         self.q = q
 
 
+    # ode solver
     def a(self, x, y):
         q = self.q
         pi = np.pi
@@ -146,7 +149,11 @@ class EllipticProblem():
         return result
 
 
-    def solve_elliptic_bvp(self, y, Nx = 2, tol=1e-5):
+    def solve(self, y, Nx = 2, tol=1e-5):
+        """
+        y:  parameter
+        Nx: initial mesh resolution
+        """
         def rhs(x, u):
             u0 = u[[1]]
             u1 = (self.f(x) - self.dx_a(x,y))/self.a(x,y)
@@ -160,8 +167,9 @@ class EllipticProblem():
         u = np.zeros((2,Nx))
 
         return solve_bvp(rhs, bc, x, u, tol=tol)
-
-
+    
+    
+    # call
     def __call__(self, y):
         if y.ndim == 1:
             y = y[np.newaxis,:]
@@ -178,31 +186,152 @@ class EllipticProblem():
             for func, args in iter(input.get, 'STOP'):
                 result = func(*args)
                 output.put(result)
-        def calc_qoi(y_row, idx):
-            solobj = self.solve_elliptic_bvp(y_row)
+        def calc_qoi(idx, y_row):
+            solobj = self.solve(y_row)
             u_sol = lambda x: solobj.sol(x)[0]
             res = quad(u_sol, a=1/8, b=3/8)[0]
-            return res, idx
+            return idx, res
         N_PROCESSES = cpu_count()
         task_queue = Queue()
         done_queue = Queue()
-        TASKS = [(calc_qoi, (y[row,:], row)) for row in range(y_rows)]
+        TASKS = [(calc_qoi, (row_idx, y_row)) for row_idx, y_row in enumerate(y)]
         for task in TASKS:
             task_queue.put(task)
         for i in range(N_PROCESSES):
             Process(target=worker, args=(task_queue, done_queue)).start()
-        for i in range(len(TASKS)):
-            res, idx = done_queue.get()
+        for task in TASKS:
+            idx, res = done_queue.get()
             qoi[idx] = res
         for i in range(N_PROCESSES):
             task_queue.put('STOP')
 
         # for row in range(y_rows):
-        #     solobj = self.solve_elliptic_bvp(y[row,:])
+        #     solobj = self.solve(y[row,:])
         #     u_sol = lambda x: solobj.sol(x)[0]
         #     qoi[row] = quad(u_sol, a=1/8, b=3/8)[0]
 
         return qoi
+
+
+class EllipticProblemFE():
+    def __init__(self, ydim, Nx, f = lambda x: np.zeros_like(x), q=4/3):
+        from mpi4py import MPI
+        from dolfinx import mesh, fem, default_scalar_type
+        import ufl
+
+        # spaces
+        domain = mesh.create_unit_interval(MPI.COMM_SELF, Nx-1)
+        V = fem.functionspace(domain, ("Lagrange", 1))
+
+        # boundary conditions
+        uD = fem.Constant(domain, default_scalar_type(0.0))
+        tdim = domain.topology.dim
+        fdim = tdim - 1
+        domain.topology.create_connectivity(fdim, tdim)
+        boundary_facets = mesh.exterior_facet_indices(domain.topology)
+        boundary_dofs = fem.locate_dofs_topological(V, fdim, boundary_facets)
+        bc = fem.dirichletbc(uD, boundary_dofs, V)
+
+
+        self.dim = ydim
+        self.f = f
+        self.q = q
+
+        self.domain = domain
+        self.V = V
+        self.bc = bc
+        self.Nx = Nx
+
+
+    # fem solver
+    def c_unif(self, x, y):
+        import ufl
+        q = 2
+        pi = np.pi
+        dim = self.dim
+
+        result = 1
+        for j in range(dim):
+            result += y[j]/(1+(j*pi)**q)*ufl.sin(j*pi*x[0])
+
+        return result
+    
+
+    def solve(self, y):
+        from dolfinx import fem, default_scalar_type
+        from dolfinx.fem.petsc import LinearProblem
+        import ufl
+        V = self.V
+        domain = self.domain
+        bc = self.bc
+
+        # variational problem
+        u = ufl.TrialFunction(V)
+        v = ufl.TestFunction(V)
+        f = fem.Constant(domain, default_scalar_type(0.0))
+        
+        x = ufl.SpatialCoordinate(domain)
+        a = self.c_unif(x, y)*ufl.dot(ufl.grad(u), ufl.grad(v)) * ufl.dx
+        L = f * v * ufl.dx
+
+        # assemble & solve
+        problem = LinearProblem(
+            a,
+            L,
+            bcs=[bc],
+            petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+            petsc_options_prefix="Poisson",
+        )
+        problem.solve()
+
+        return problem
+
+    
+    def L2error_to_fem(self, y, Nx, coefficients):
+        from mpi4py import MPI
+        from dolfinx import fem
+        import ufl
+        u_h     = self.solve(y).u
+        u_hs    = fem.Function(self.V, coefficients) # surrogate/interpolant
+        L2error = fem.form(ufl.inner(u_h-u_hs,u_h-u_hs)*ufl.dx)
+        error_local = fem.assemble_scalar(L2error)
+        L2error = np.sqrt(self.domain.comm.allreduce(error_local, op=MPI.SUM))
+
+        return L2error
+
+
+    def __call__(self, y):
+        if y.ndim == 1:
+            y = y[np.newaxis,:]
+            y_rows = 1
+            y_cols = y.shape[1]
+        elif y.ndim==2:
+            y_rows, y_cols = y.shape
+        assert y_cols == self.dim
+        
+        fem_coefficients = np.zeros((y_rows, self.Nx))
+
+        def pde_worker(input, output, ydim, Nx, f, q):
+            elliptic_problem = EllipticProblemFE(ydim, Nx, f, q)
+            for row_idx, y in iter(input.get, 'STOP'):
+                sol = elliptic_problem.solve(y)
+                coefficients = np.array(sol.x)
+                output.put((row_idx, coefficients))
+        N_PROCESSES = cpu_count()
+        task_queue = Queue()
+        done_queue = Queue()
+        TASKS = [(row_idx, y_row) for row_idx, y_row in enumerate(y)]
+        for task in TASKS:
+            task_queue.put(task)
+        for n in range(N_PROCESSES):
+            Process(target=pde_worker, args=(task_queue, done_queue, self.dim, self.Nx, self.f, self.q)).start()
+        for task in TASKS:
+            row_idx, coefs = done_queue.get()
+            fem_coefficients[row_idx,:] = coefs
+        for n in range(N_PROCESSES):
+            task_queue.put('STOP')
+
+        return fem_coefficients
 
 
 if __name__ == '__main__':
