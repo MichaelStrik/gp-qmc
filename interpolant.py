@@ -4,6 +4,7 @@ from multiprocess import Process, Queue
 from os import cpu_count
 
 from numbers import Number
+from utils import worker
 
 
 class KernelInterpolant:
@@ -111,6 +112,17 @@ class KernelInterpolant:
         yeval = Keval@(self.alpha)
 
         return yeval
+    
+
+    def native_norm(self):
+        """
+        Computes native/reproducing kernel Hilbert space norm of the interpolant.
+        """
+        alpha = self.alpha
+        X = self.xdesign
+        K = self.kernel(X[:,np.newaxis,:], X[np.newaxis,:,:])
+
+        return np.inner(alpha@K,alpha)
 
 
     def error_L2squared(self, target, Nsamples, method='lattice', qmc_shifts=1, normalisation=None, **kwargs):
@@ -146,11 +158,6 @@ class KernelInterpolant:
         # shift-average qmc estimator
         Q_s = np.zeros(qmc_shifts)
         L2norm_squared = 0
-        # parallelisation helpers
-        def worker(input, output):
-            for func, args in iter(input.get, 'STOP'):
-                result = func(*args)
-                output.put(result)
         def calc_d(pts):
             target_eval = target(pts)
             self_eval = self(pts)
