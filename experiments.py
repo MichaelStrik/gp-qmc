@@ -65,7 +65,7 @@ def interpolate_multivar(test_function, output_dim, kernel, Ndesign, num_design_
     return interpolants
 
 
-def L2errorFEM(interpolants: np.array, Nsamples, Nx, f:Callable, q, method='lattice', qmc_shifts=1, **kwargs):
+def L2errorFEM(interpolants: np.array, Nsamples, Nx, transform, f:Callable, q, method='lattice', qmc_shifts=1, **kwargs):
     r"""
     Computes the error \int_U \int_D (u_h(x,y) - u_{h,n}(x,y))^2 dx dy over the physical domain D \subset \R and stocahstic domain U
     for FEM solutions u_h and kernel interpolants u_{h,n}.
@@ -111,21 +111,16 @@ def L2errorFEM(interpolants: np.array, Nsamples, Nx, f:Callable, q, method='latt
         point_sets = qmcGen(Nsamples, warn=False)
     # compute qmc_shifts many (shifted qmc) quadrature rules
     Qshifted = np.zeros(qmc_shifts)
-    def worker_L2error_to_fem(input, output, ydim, Nx, f, q):
+    def worker_L2error_to_fem(input, output, ydim, Nx, transform, f, q):
             from mpi4py import MPI
             from dolfinx import fem
             import ufl
-            elliptic_problem = EllipticProblemFE(ydim, Nx, f, q)
+            elliptic_problem = EllipticProblemFE(ydim, Nx, transform, f, q)
             for pts, coefs in iter(input.get, 'STOP'):
                 assert(pts.shape[0] == coefs.shape[0])
                 Q_local = 0
                 for y, coef_interp in zip(pts,coefs):
-                    u_h = elliptic_problem.solve(y).u
-                    u_hs    = fem.Function(elliptic_problem.V) # surrogate/interpolant
-                    u_hs.x.array[:] = coef_interp
-                    L2error = fem.form(ufl.inner(u_h-u_hs,u_h-u_hs)*ufl.dx)
-                    error_local = fem.assemble_scalar(L2error)
-                    L2error = np.sqrt(elliptic_problem.domain.comm.allreduce(error_local, op=MPI.SUM))
+                    L2error = elliptic_problem.L2error_to_fem(y, coef_interp)
                     Q_local += L2error
                 output.put(Q_local)
     N_PROCESSES = cpu_count()
@@ -145,7 +140,7 @@ def L2errorFEM(interpolants: np.array, Nsamples, Nx, f:Callable, q, method='latt
         for task in TASKS:
             task_queue.put(task)
         for n in range(N_PROCESSES):
-            Process(target=worker_L2error_to_fem, args=(task_queue, done_queue, ydim, Nx, f, q)).start()
+            Process(target=worker_L2error_to_fem, args=(task_queue, done_queue, ydim, Nx, transform, f, q)).start()
         for task in TASKS:
             Qshifted[shift] += done_queue.get()
         for n in range(N_PROCESSES):
@@ -325,27 +320,33 @@ def run_feminterpolation_experiment(exp_data):
     elif type(weights_decay) not in [tuple, list, np.array]:
         TypeError('weights_decay has to be a number or a tuple/list/np.array of two numbers')
     error_samples = 2**7
+    stochastic_transform_name = exp_data.get('stochastic_transform', 'uniform').lower()
+    if stochastic_transform_name == 'uniform':
+        stochastic_transform = EllipticProblemFE.transform_uniform
+    elif stochastic_transform_name == 'arcsin' or stochastic_transform_name == 'arcsine':
+        stochastic_transform = EllipticProblemFE.transform_arcsin
+    elif stochastic_transform_name == 'lognormal':
+        lognormal_parameters = exp_data.get('lognormal_parameters', [0, 1/2])
+        mu    = lognormal_parameters[0]
+        sigma = lognormal_parameters[1]
+        stochastic_transform = lambda y: EllipticProblemFE.transform_lognormal(y, mu, sigma)
 
     # interpolation
     errors = np.empty((len(dim_list), len(Ndesign_list)))
     for idx_dim, dim in enumerate(dim_list):
-        elliptic_bvp_fe = EllipticProblemFE(dim, meshsize, q=weights_decay[0])
+        elliptic_bvp_fe = EllipticProblemFE(dim, meshsize, transform=stochastic_transform, q=weights_decay[0])
         gamma = [1/j**weights_decay[1] for j in range(1,dim+1)]
         kernel = kernel_class(dim, lengthscales=gamma)
         for idx_Ndesign, Ndesign in enumerate(Ndesign_list):
             interpolants = interpolate_multivar(elliptic_bvp_fe, meshsize, kernel, Ndesign, num_design_shifts, type_design_points)
             errors[idx_dim, idx_Ndesign] = \
-                np.sqrt(np.mean([L2errorFEM(interpolants[design_shift,:], error_samples, meshsize, elliptic_bvp_fe.f, elliptic_bvp_fe.q, qmc_shifts=num_error_shifts) for design_shift in range(num_design_shifts)]))
+                np.sqrt(np.mean([L2errorFEM(interpolants[design_shift,:], error_samples, meshsize, stochastic_transform, elliptic_bvp_fe.f, elliptic_bvp_fe.q, qmc_shifts=num_error_shifts) for design_shift in range(num_design_shifts)]))
     exp_data['error_data'] = errors
     return exp_data
 
 
 def write_experiment_data(experiment):
-    # if os.path.isfile(filename):
-    #     raise ValueError("File already exists")
-    #     return
     filename  = experiment['name']
-
     with open('./exp_data/'+filename, "wb") as file:
         pickle.dump(experiment, file)
 
