@@ -5,7 +5,7 @@ from qmcpy.util.transforms import tf_exp_eps,tf_exp_eps_inv
 import numpy as np
 
 
-class AbstractWeightedKernel():
+class AbstractWeightedKernel:
     """
     Abstract class for kernels with product weights or with product and order dependent (POD) weights. 
     For the product case, one only needs to specify weights for each individual dimension (dimension_weights),
