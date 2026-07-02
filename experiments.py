@@ -2,6 +2,8 @@ import pickle
 from numbers import Number
 from collections.abc import Callable
 from os import cpu_count
+import time
+import itertools
 
 from multiprocess import Process, Queue
 import numpy as np
@@ -46,22 +48,44 @@ def interpolate(test_function, kernel, Ndesign, num_design_shifts, type_design_p
 
 
 def interpolate_multivar(test_function, output_dim, kernel, Ndesign, num_design_shifts, type_design_points='lattice'):
+    timestamp = time.time()
+    print("Building interpolants.")
     input_dim = kernel.d
     interpolants = np.empty((num_design_shifts, output_dim), dtype=KernelInterpolant)
+    xdesigns = np.empty((num_design_shifts, Ndesign, input_dim))
+    ydesigns = np.empty((num_design_shifts, Ndesign, output_dim))
     for shift in range(num_design_shifts):
-        # generate design points
         interpolant = KernelInterpolant(kernel, input_dim) # this interpolant is only needed to generate a common design
         interpolant.generate_design_points(Ndesign, method=type_design_points)
-        xdesign = interpolant.xdesign
-        ydesign = test_function(xdesign)
-
-        for outdim in range(output_dim):
-            interpolant = KernelInterpolant(kernel, input_dim)
-            interpolant.xdesign = xdesign
-            interpolant.ydesign = ydesign[:,outdim]
-            interpolant.build_interpolant()
-            interpolants[shift, outdim] = interpolant
-
+        xdesigns[shift] = interpolant.xdesign
+        ydesigns[shift] = test_function(interpolant.xdesign)
+    # build interpolants in parallel
+    N_PROCESSES = cpu_count()
+    task_queue = Queue()
+    done_queue = Queue()
+    def generate_interpolant(interpolant, xdesign, ydesign, shift, outdim):
+        interpolant.xdesign = xdesign
+        interpolant.ydesign = ydesign
+        interpolant.build_interpolant()
+        return interpolant, shift, outdim
+    TASKS = [(generate_interpolant, (KernelInterpolant(kernel, input_dim), xdesigns[shift], ydesigns[shift,:,outdim], shift, outdim)) for (shift, outdim) in itertools.product(range(num_design_shifts), range(output_dim))]
+    for task in TASKS:
+        task_queue.put(task)
+    for n in range(N_PROCESSES):
+        Process(target=worker, args=(task_queue, done_queue)).start()
+    for task in TASKS:
+        interpolant, shift, outdim = done_queue.get()
+        interpolants[shift, outdim] = interpolant
+    for n in range(N_PROCESSES):
+        task_queue.put('STOP')
+    # for shift in range(num_design_shifts):
+    #     for outdim in range(output_dim):
+    #         interpolant = KernelInterpolant(kernel, input_dim)
+    #         interpolant.xdesign = xdesign
+    #         interpolant.ydesign = ydesign[:,outdim]
+    #         interpolant.build_interpolant()
+    #         interpolants[shift, outdim] = interpolant
+    print(f"Built all interpolants with {time.time() - timestamp}s runtime.")
     return interpolants
 
 
