@@ -4,7 +4,9 @@ from multiprocess import Process, Queue
 from os import cpu_count
 
 from numbers import Number
-from utils import worker
+from utils import worker, print_runtime
+
+from threadpoolctl import threadpool_limits
 
 
 class KernelInterpolant:
@@ -83,10 +85,11 @@ class KernelInterpolant:
     def build_interpolant(self):
         """Builds the kernel based interpolant.
         """ 
-        K = self.kernel(self.xdesign[:,np.newaxis,:], self.xdesign[np.newaxis,:,:])
-        self.condition_number = np.linalg.cond(K)
         # print(f"Condition number: {self.condition_number:.2e}")
-        alpha = np.linalg.solve(K,self.ydesign)
+        K = self.kernel(self.xdesign[:,np.newaxis,:], self.xdesign[np.newaxis,:,:])
+        with threadpool_limits(limits=cpu_count()-1):
+            self.condition_number = np.linalg.cond(K)
+            alpha = np.linalg.solve(K,self.ydesign)
     
         self.alpha = alpha
 
@@ -109,6 +112,7 @@ class KernelInterpolant:
         #     yeval = np.dot(Keval,(self.alpha))
 
         Keval = self.kernel(xeval[:,np.newaxis,:], self.xdesign[np.newaxis,:,:])
+        # with threadpool_limits(limits=cpu_count()-1):
         yeval = Keval@(self.alpha)
 
         return yeval
@@ -163,7 +167,7 @@ class KernelInterpolant:
             self_eval = self(pts)
             d = target_eval - self_eval
             return np.sum(d**2), np.sum(target_eval**2)
-        N_PROCESSES = cpu_count()
+        N_PROCESSES = 1#cpu_count()
         task_queue = Queue()
         done_queue = Queue()
         for r in range(qmc_shifts):

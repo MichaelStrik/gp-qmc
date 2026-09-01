@@ -7,6 +7,16 @@ from multiprocess import Process, Queue
 from os import cpu_count
 from utils import worker
 
+import ufl
+from mpi4py import MPI
+from dolfinx import fem
+from dolfinx import fem, default_scalar_type
+from dolfinx.fem.petsc import LinearProblem
+from dolfinx import mesh, fem, default_scalar_type
+
+from utils import print_runtime
+
+
 
 class TestFunction:
     """Represents a relatively simple function in the RKHS of a given kernel intended as a benchmarking/test problem.
@@ -151,7 +161,7 @@ class EllipticProblemQOI:
         return result
 
 
-    def solve(self, y, Nx = 2, tol=1e-5):
+    def solve(self, y, Nx = 2, tol=1e-6):
         """
         y:  parameter
         Nx: initial mesh resolution
@@ -193,7 +203,7 @@ class EllipticProblemQOI:
             u_sol = lambda x: solobj.sol(x)[0]
             res = quad(u_sol, a=1/8, b=3/8)[0]
             return idx, res
-        N_PROCESSES = cpu_count()
+        N_PROCESSES = cpu_count() - 1
         task_queue = Queue()
         done_queue = Queue()
         TASKS = [(calc_qoi, (row_idx, y_row)) for row_idx, y_row in enumerate(y)]
@@ -217,10 +227,6 @@ class EllipticProblemQOI:
 
 class EllipticProblemFE:
     def __init__(self, ydim, Nx, transform=None, f = lambda x: np.zeros_like(x), q=4/3):
-        from mpi4py import MPI
-        from dolfinx import mesh, fem, default_scalar_type
-        import ufl
-
         # spaces
         domain = mesh.create_unit_interval(MPI.COMM_SELF, Nx-1)
         V = fem.functionspace(domain, ("Lagrange", 1))
@@ -247,17 +253,32 @@ class EllipticProblemFE:
             transform = self.transform_uniform
         self.transform = transform
 
+        # define variational form form
+        # functions
+        self.c = fem.Function(V) # spatially varying coefficient function
+        self.u = ufl.TrialFunction(V)
+        self.v = ufl.TestFunction(V)
+        self.f_ufl = fem.Constant(domain, default_scalar_type(0.0))
+        # formulation
+        self.a = self.c*ufl.dot(ufl.grad(self.u), ufl.grad(self.v)) * ufl.dx
+        self.L = self.f_ufl * self.v * ufl.dx
+
+        # error computing
+        self.u_h    = fem.Function(V) # fem solution
+        self.u_hn   = fem.Function(V) # surrogate/interpolated solution
+
+        self.L2error_form = fem.form(ufl.inner(self.u_h-self.u_hn,self.u_h-self.u_hn)*ufl.dx)
+
 
     # fem solver
-    def c(self, x, y):
-        import ufl
+    def c_fun(self, x, y):
         q = self.q
         pi = np.pi
         dim = self.dim
 
         diffusion = 1
         for j in range(dim):
-            diffusion += y[j]/(1+(j*pi)**q)*ufl.sin(j*pi*x[0])
+            diffusion += y[j]/(1+(j*pi)**q)*np.sin(j*pi*x[0])
         return diffusion
     
     @staticmethod
@@ -270,7 +291,7 @@ class EllipticProblemFE:
     
     @staticmethod
     def transform_lognormal(y, mu, sigma):
-        X = Normal(0,1)
+        X = Normal(mu=0,sigma=1)
         return np.exp(mu + sigma*X.icdf(y))
 
     def set_lognormal_parameters(self, mu, sigma):
@@ -279,28 +300,15 @@ class EllipticProblemFE:
     
 
     def solve(self, y):
-        from dolfinx import fem, default_scalar_type
-        from dolfinx.fem.petsc import LinearProblem
-        import ufl
-        V = self.V
-        domain = self.domain
-        bc = self.bc
+        # compute coefficients
         y = self.transform(y)
-
-        # variational problem
-        u = ufl.TrialFunction(V)
-        v = ufl.TestFunction(V)
-        f = fem.Constant(domain, default_scalar_type(0.0))
-        
-        x = ufl.SpatialCoordinate(domain)
-        a = self.c(x, y)*ufl.dot(ufl.grad(u), ufl.grad(v)) * ufl.dx
-        L = f * v * ufl.dx
+        self.c.interpolate(lambda x: self.c_fun(x,y))
 
         # assemble & solve
         problem = LinearProblem(
-            a,
-            L,
-            bcs=[bc],
+            self.a,
+            self.L,
+            bcs=[self.bc],
             petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
             petsc_options_prefix="Poisson",
         )
@@ -308,16 +316,12 @@ class EllipticProblemFE:
 
         return problem
 
-    
+
     def L2error_to_fem(self, y, coefficients):
-        from mpi4py import MPI
-        from dolfinx import fem
-        import ufl
-        u_h     = self.solve(y).u
-        u_hs    = fem.Function(self.V) # surrogate/interpolant
-        u_hs.x.array[:] = coefficients
-        L2error = fem.form(ufl.inner(u_h-u_hs,u_h-u_hs)*ufl.dx)
-        error_local = fem.assemble_scalar(L2error)
+        self.u_h.interpolate(self.solve(y).u) # solve pde. interpolation is exact since both piecewise linear on the mesh
+        self.u_hn.x.array[:] = coefficients   # construct finite element function with coefficients from interpolant
+
+        error_local = fem.assemble_scalar(self.L2error_form)
         L2error = np.sqrt(self.domain.comm.allreduce(error_local, op=MPI.SUM))
 
         return L2error
@@ -343,16 +347,20 @@ class EllipticProblemFE:
         N_PROCESSES = cpu_count()
         task_queue = Queue()
         done_queue = Queue()
+        processes = []
         TASKS = [(row_idx, y_row) for row_idx, y_row in enumerate(y)]
         for task in TASKS:
             task_queue.put(task)
         for n in range(N_PROCESSES):
-            Process(target=pde_worker, args=(task_queue, done_queue, self.dim, self.Nx, self.transform, self.f, self.q)).start()
+            processes.append(Process(target=pde_worker, args=(task_queue, done_queue, self.dim, self.Nx, self.transform, self.f, self.q)))
+            processes[-1].start()
         for task in TASKS:
             row_idx, coefs = done_queue.get()
             fem_coefficients[row_idx,:] = coefs
         for n in range(N_PROCESSES):
             task_queue.put('STOP')
+        for process in processes:
+            process.join()
 
         return fem_coefficients
 

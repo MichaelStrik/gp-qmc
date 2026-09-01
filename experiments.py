@@ -1,6 +1,7 @@
 import pickle
 from numbers import Number
 from collections.abc import Callable
+from os import getpid
 from os import cpu_count
 import time
 import itertools
@@ -12,7 +13,9 @@ import qmcpy
 from kernels import UnanchoredSobolevKernel, AnchoredSobolevKernel
 from interpolant import KernelInterpolant
 from testproblems import TestFunction, EllipticProblemQOI, EllipticProblemFE
-from utils import worker
+from utils import worker, print_runtime
+
+from threadpoolctl import threadpool_info
 
 
 def interpolate(test_function, kernel, Ndesign, num_design_shifts, type_design_points='lattice'):
@@ -25,7 +28,7 @@ def interpolate(test_function, kernel, Ndesign, num_design_shifts, type_design_p
         test_function_norm = None
 
     # parameters for error approximation
-    k = 9
+    k = 10
     num_error_shifts = 10
 
     interpolants = []
@@ -49,18 +52,18 @@ def interpolate(test_function, kernel, Ndesign, num_design_shifts, type_design_p
 
 def interpolate_multivar(test_function, output_dim, kernel, Ndesign, num_design_shifts, type_design_points='lattice'):
     timestamp = time.time()
-    print("Building interpolants.")
+    print("\t\tBuilding interpolants.")
     input_dim = kernel.d
     interpolants = np.empty((num_design_shifts, output_dim), dtype=KernelInterpolant)
     xdesigns = np.empty((num_design_shifts, Ndesign, input_dim))
     ydesigns = np.empty((num_design_shifts, Ndesign, output_dim))
     for shift in range(num_design_shifts):
-        interpolant = KernelInterpolant(kernel, input_dim) # this interpolant is only needed to generate a common design
+        interpolant = KernelInterpolant(kernel, input_dim) # this interpolant is only needed to generate one common design
         interpolant.generate_design_points(Ndesign, method=type_design_points)
         xdesigns[shift] = interpolant.xdesign
         ydesigns[shift] = test_function(interpolant.xdesign)
     # build interpolants in parallel
-    N_PROCESSES = cpu_count()
+    N_PROCESSES = 1#cpu_count()
     task_queue = Queue()
     done_queue = Queue()
     def generate_interpolant(interpolant, xdesign, ydesign, shift, outdim):
@@ -71,13 +74,17 @@ def interpolate_multivar(test_function, output_dim, kernel, Ndesign, num_design_
     TASKS = [(generate_interpolant, (KernelInterpolant(kernel, input_dim), xdesigns[shift], ydesigns[shift,:,outdim], shift, outdim)) for (shift, outdim) in itertools.product(range(num_design_shifts), range(output_dim))]
     for task in TASKS:
         task_queue.put(task)
+    processes = []
     for n in range(N_PROCESSES):
-        Process(target=worker, args=(task_queue, done_queue)).start()
+        processes.append(Process(target=worker, args=(task_queue, done_queue)))
+        processes[-1].start()
     for task in TASKS:
         interpolant, shift, outdim = done_queue.get()
         interpolants[shift, outdim] = interpolant
     for n in range(N_PROCESSES):
         task_queue.put('STOP')
+    for process in processes:
+        process.join()
     # for shift in range(num_design_shifts):
     #     for outdim in range(output_dim):
     #         interpolant = KernelInterpolant(kernel, input_dim)
@@ -85,7 +92,7 @@ def interpolate_multivar(test_function, output_dim, kernel, Ndesign, num_design_
     #         interpolant.ydesign = ydesign[:,outdim]
     #         interpolant.build_interpolant()
     #         interpolants[shift, outdim] = interpolant
-    print(f"Built all interpolants with {time.time() - timestamp}s runtime.")
+    print(f"\t\tBuilt interpolants with {(time.time() - timestamp):.1f}s runtime.")
     return interpolants
 
 
@@ -136,9 +143,6 @@ def L2errorFEM(interpolants: np.array, Nsamples, Nx, transform, f:Callable, q, m
     # compute qmc_shifts many (shifted qmc) quadrature rules
     Qshifted = np.zeros(qmc_shifts)
     def worker_L2error_to_fem(input, output, ydim, Nx, transform, f, q):
-            from mpi4py import MPI
-            from dolfinx import fem
-            import ufl
             elliptic_problem = EllipticProblemFE(ydim, Nx, transform, f, q)
             for pts, coefs in iter(input.get, 'STOP'):
                 assert(pts.shape[0] == coefs.shape[0])
@@ -147,30 +151,55 @@ def L2errorFEM(interpolants: np.array, Nsamples, Nx, transform, f:Callable, q, m
                     L2error = elliptic_problem.L2error_to_fem(y, coef_interp)
                     Q_local += L2error
                 output.put(Q_local)
-    N_PROCESSES = cpu_count()
+    N_PROCESSES = cpu_count()-1
     task_queue = Queue()
     done_queue = Queue()
     for shift in range(qmc_shifts):
         points = point_sets[shift,:,:]
-        points_splits = np.array_split(points, N_PROCESSES)
-        coefficients_splits = []
-        # calculate interpolated fem coefficients at error sampling points
-        for pts in points_splits:
-            coefs = np.empty((pts.shape[0],Nx))
-            for row, y in enumerate(pts):
-                coefs[row,:] = np.concatenate([interpolant(y) for interpolant in interpolants])
-            coefficients_splits.append(coefs)
-        TASKS = [(pts,coefs) for (pts,coefs) in zip(points_splits,coefficients_splits)]
+
+        # calculate interpolated fem coefficients at points
+        fem_coefficients = np.empty((points.shape[0],Nx))
+        timestamp = time.time()
+        def evaluate(i, interpolant, points):
+            coefs = interpolant(points)
+            return i, coefs
+        TASKS = [(evaluate, (i, interpolant, points)) for i, interpolant in enumerate(interpolants)]
         for task in TASKS:
             task_queue.put(task)
+        processes = []
         for n in range(N_PROCESSES):
-            Process(target=worker_L2error_to_fem, args=(task_queue, done_queue, ydim, Nx, transform, f, q)).start()
+            processes.append(Process(target=worker, args=(task_queue, done_queue)))
+            processes[-1].start()
+        for task in TASKS:
+            i, coefs = done_queue.get()
+            fem_coefficients[:,i] = coefs
+        for n in range(N_PROCESSES):
+            task_queue.put('STOP')
+        for process in processes:
+            process.join()
+
+        # for i, interpolant in enumerate(interpolants):
+        #     fem_coefficients[:,i] = interpolant(points)
+        duration = time.time() - timestamp
+        print(f"\t\t\tInterpolating coefficients took {duration:.2f}s.")
+
+        # at sampling points, calculate L2 distance between surrogate and FEM approximations
+        points_splits = np.array_split(points, N_PROCESSES)
+        fem_coefficients_splits = np.array_split(fem_coefficients, N_PROCESSES)
+        TASKS = [(pts,coefs) for (pts,coefs) in zip(points_splits,fem_coefficients_splits)]
+        for task in TASKS:
+            task_queue.put(task)
+        processes = []
+        for n in range(N_PROCESSES):
+            processes.append(Process(target=worker_L2error_to_fem, args=(task_queue, done_queue, ydim, Nx, transform, f, q)))
+            processes[-1].start()
         for task in TASKS:
             Qshifted[shift] += done_queue.get()
         for n in range(N_PROCESSES):
             task_queue.put('STOP')
+        for process in processes:
+            process.join()
         Qshifted[shift] /= Nsamples
-    
     return np.mean(Qshifted)
 
 
@@ -197,13 +226,13 @@ def run_bvp_experiment(exp_data):
 
     # experiment
     for idx_dim, dim in enumerate(dim_list):
-        print(f"Dimension {dim}")
+        print(f"\tDimension {dim}")
         gamma = [1/j**weights_decay[1] for j in range(1,dim+1)]
         kernel = kernel_class(dim, lengthscales=gamma)
 
         elliptic_bvp = EllipticProblemQOI(dim, q=weights_decay[0])
         for idx_Ndesign, Ndesign in enumerate(Ndesign_list):
-            print(f"\tNdesign {Ndesign}")
+            print(f"\t\tNdesign {Ndesign}")
             interpolants_design_shifts, errors_design_shifts = interpolate(elliptic_bvp, kernel, Ndesign, num_design_shifts, type_design_points)
             errors[idx_dim, idx_Ndesign]            = np.sqrt(np.mean(errors_design_shifts)) # shift-average error
             condition_numbers[idx_dim, idx_Ndesign] = np.mean([interpolants_design_shifts[j].condition_number for j in range(num_design_shifts)]) # shift-average condition number
@@ -343,7 +372,7 @@ def run_feminterpolation_experiment(exp_data):
         weights_decay = (weights_decay, weights_decay)
     elif type(weights_decay) not in [tuple, list, np.array]:
         TypeError('weights_decay has to be a number or a tuple/list/np.array of two numbers')
-    error_samples = 2**7
+    error_samples = 2**10
     stochastic_transform_name = exp_data.get('stochastic_transform', 'uniform').lower()
     if stochastic_transform_name == 'uniform':
         stochastic_transform = EllipticProblemFE.transform_uniform
@@ -358,13 +387,17 @@ def run_feminterpolation_experiment(exp_data):
     # interpolation
     errors = np.empty((len(dim_list), len(Ndesign_list)))
     for idx_dim, dim in enumerate(dim_list):
+        print(f"\tDimension {dim}")
         elliptic_bvp_fe = EllipticProblemFE(dim, meshsize, transform=stochastic_transform, q=weights_decay[0])
         gamma = [1/j**weights_decay[1] for j in range(1,dim+1)]
         kernel = kernel_class(dim, lengthscales=gamma)
         for idx_Ndesign, Ndesign in enumerate(Ndesign_list):
+            print(f"\t\tNdesign {Ndesign}")
             interpolants = interpolate_multivar(elliptic_bvp_fe, meshsize, kernel, Ndesign, num_design_shifts, type_design_points)
+            timestamp = time.time()
             errors[idx_dim, idx_Ndesign] = \
                 np.sqrt(np.mean([L2errorFEM(interpolants[design_shift,:], error_samples, meshsize, stochastic_transform, elliptic_bvp_fe.f, elliptic_bvp_fe.q, qmc_shifts=num_error_shifts) for design_shift in range(num_design_shifts)]))
+            print(f"\t\tFinished error sampling with {(time.time() - timestamp):.1f}s runtime.")
     exp_data['error_data'] = errors
     return exp_data
 
