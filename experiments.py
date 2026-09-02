@@ -13,9 +13,7 @@ import qmcpy
 from kernels import UnanchoredSobolevKernel, AnchoredSobolevKernel
 from interpolant import KernelInterpolant
 from testproblems import TestFunction, EllipticProblemQOI, EllipticProblemFE
-from utils import worker, print_runtime
-
-from threadpoolctl import threadpool_info
+from utils import worker
 
 
 def interpolate(test_function, kernel, Ndesign, num_design_shifts, type_design_points='lattice'):
@@ -140,6 +138,7 @@ def L2errorFEM(interpolants: np.array, Nsamples, Nx, transform, f:Callable, q, m
         qmcGens = {'lattice': qmcpy.Lattice, 'digital_net': qmcpy.DigitalNetB2}
         qmcGen = qmcGens[method](dimension=ydim, replications=qmc_shifts, **kwargs)
         point_sets = qmcGen(Nsamples, warn=False)
+
     # compute qmc_shifts many (shifted qmc) quadrature rules
     Qshifted = np.zeros(qmc_shifts)
     def worker_L2error_to_fem(input, output, ydim, Nx, transform, f, q):
@@ -388,7 +387,7 @@ def run_feminterpolation_experiment(exp_data):
     errors = np.empty((len(dim_list), len(Ndesign_list)))
     for idx_dim, dim in enumerate(dim_list):
         print(f"\tDimension {dim}")
-        elliptic_bvp_fe = EllipticProblemFE(dim, meshsize, transform=stochastic_transform, q=weights_decay[0])
+        elliptic_bvp_fe = EllipticProblemFE(dim, meshsize, transform=stochastic_transform, f=lambda x: x[0], q=weights_decay[0])
         gamma = [1/j**weights_decay[1] for j in range(1,dim+1)]
         kernel = kernel_class(dim, lengthscales=gamma)
         for idx_Ndesign, Ndesign in enumerate(Ndesign_list):

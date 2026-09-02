@@ -5,7 +5,6 @@ from scipy.stats import Normal
 # parallel
 from multiprocess import Process, Queue
 from os import cpu_count
-from utils import worker
 
 import ufl
 from mpi4py import MPI
@@ -13,9 +12,6 @@ from dolfinx import fem
 from dolfinx import fem, default_scalar_type
 from dolfinx.fem.petsc import LinearProblem
 from dolfinx import mesh, fem, default_scalar_type
-
-from utils import print_runtime
-
 
 
 class TestFunction:
@@ -226,7 +222,7 @@ class EllipticProblemQOI:
 
 
 class EllipticProblemFE:
-    def __init__(self, ydim, Nx, transform=None, f = lambda x: np.zeros_like(x), q=4/3):
+    def __init__(self, ydim, Nx, transform=None, f = lambda x: x[0], q=4/3):
         # spaces
         domain = mesh.create_unit_interval(MPI.COMM_SELF, Nx-1)
         V = fem.functionspace(domain, ("Lagrange", 1))
@@ -253,21 +249,22 @@ class EllipticProblemFE:
             transform = self.transform_uniform
         self.transform = transform
 
-        # define variational form form
+        # define variational form
         # functions
         self.c = fem.Function(V) # spatially varying coefficient function
         self.u = ufl.TrialFunction(V)
         self.v = ufl.TestFunction(V)
-        self.f_ufl = fem.Constant(domain, default_scalar_type(0.0))
+        self.f_ufl = fem.Function(V)
+        self.f_ufl.interpolate(self.f)
         # formulation
         self.a = self.c*ufl.dot(ufl.grad(self.u), ufl.grad(self.v)) * ufl.dx
         self.L = self.f_ufl * self.v * ufl.dx
 
-        # error computing
+        # error computation
         self.u_h    = fem.Function(V) # fem solution
         self.u_hn   = fem.Function(V) # surrogate/interpolated solution
-
-        self.L2error_form = fem.form(ufl.inner(self.u_h-self.u_hn,self.u_h-self.u_hn)*ufl.dx)
+        self.u_err  = fem.Function(V)
+        self.L2error_form = fem.form(ufl.inner(self.u_err, self.u_err)*ufl.dx)
 
 
     # fem solver
@@ -317,10 +314,9 @@ class EllipticProblemFE:
         return problem
 
 
-    def L2error_to_fem(self, y, coefficients):
-        self.u_h.interpolate(self.solve(y).u) # solve pde. interpolation is exact since both piecewise linear on the mesh
-        self.u_hn.x.array[:] = coefficients   # construct finite element function with coefficients from interpolant
-
+    def L2error_to_fem(self, y, dof_coefficients):
+        self.u_h.interpolate(self.solve(y).u)           # solve pde. interpolation is exact
+        self.u_err.x.array[:] = self.u_h.x.array - dof_coefficients
         error_local = fem.assemble_scalar(self.L2error_form)
         L2error = np.sqrt(self.domain.comm.allreduce(error_local, op=MPI.SUM))
 
