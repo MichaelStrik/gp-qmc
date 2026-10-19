@@ -1,19 +1,19 @@
 import pickle
 from numbers import Number
 from collections.abc import Callable
-from os import getpid
 from os import cpu_count
 import time
 import itertools
 
 from multiprocess import Process, Queue
 import numpy as np
+from scipy.special import zeta
 import qmcpy
 
 from kernels import UnanchoredSobolevKernel, AnchoredSobolevKernel
 from interpolant import KernelInterpolant
 from testproblems import TestFunction, EllipticProblemQOI, EllipticProblemFE
-from utils import worker
+from utils import worker, get_touchard_polynomial
 
 
 def interpolate(test_function, kernel, Ndesign, num_design_shifts, type_design_points='lattice'):
@@ -41,7 +41,9 @@ def interpolate(test_function, kernel, Ndesign, num_design_shifts, type_design_p
         interpolant.ydesign = test_function(xdesign)
 
         # build interpolant and approximate error
+        # print("\t\tBuilding interpolant")
         interpolant.build_interpolant()
+        # print("\t\tSampling error function")
         errors[shift] = interpolant.error_L2squared(test_function, Nsamples=2**k, qmc_shifts=num_error_shifts, normalisation=test_function_norm) # TODO Is normalisation by the squared norm more appropriate?
         interpolants.append(interpolant)
 
@@ -94,10 +96,15 @@ def interpolate_multivar(test_function, output_dim, kernel, Ndesign, num_design_
     return interpolants
 
 
-def L2errorFEM(interpolants: np.array, Nsamples, Nx, transform, f:Callable, q, method='lattice', qmc_shifts=1, **kwargs):
+def errorsFEM(interpolants: np.array, Nsamples, Nx, transform, f:Callable, q, method='lattice', qmc_shifts=1, **kwargs):
     r"""
-    Computes the error \int_U \int_D (u_h(x,y) - u_{h,n}(x,y))^2 dx dy over the physical domain D \subset \R and stocahstic domain U
-    for FEM solutions u_h and kernel interpolants u_{h,n}.
+    Computes the L2-L2 error 
+        $$ \int_U \int_D (u_h(x,y) - u_{h,n}(x,y))^2 dx dy $$
+
+    and the L2-energy error 
+        $$ \int_U \int_D (\nabla u_h(x,y) - \nabla u_{h,n}(x,y))^2 dx dy $$ 
+    
+    over the physical domain D \subset \R and the stochastic domain U for FEM solutions u_h and kernel interpolants u_{h,n}.
 
     Args:
         interpolants:np.array
@@ -140,16 +147,20 @@ def L2errorFEM(interpolants: np.array, Nsamples, Nx, transform, f:Callable, q, m
         point_sets = qmcGen(Nsamples, warn=False)
 
     # compute qmc_shifts many (shifted qmc) quadrature rules
-    Qshifted = np.zeros(qmc_shifts)
-    def worker_L2error_to_fem(input, output, ydim, Nx, transform, f, q):
+    Q_L2_shifted = np.zeros(qmc_shifts)
+    Q_energy_shifted = np.zeros(qmc_shifts)
+
+    def worker_error_to_fem(input, output, ydim, Nx, transform, f, q):
             elliptic_problem = EllipticProblemFE(ydim, Nx, transform, f, q)
             for pts, coefs in iter(input.get, 'STOP'):
                 assert(pts.shape[0] == coefs.shape[0])
-                Q_local = 0
+                Q_L2_local = 0
+                Q_energy_local = 0
                 for y, coef_interp in zip(pts,coefs):
-                    L2error = elliptic_problem.L2error_to_fem(y, coef_interp)
-                    Q_local += L2error
-                output.put(Q_local)
+                    L2error, energy_error = elliptic_problem.error_to_fem(y, coef_interp)
+                    Q_L2_local += L2error
+                    Q_energy_local += energy_error
+                output.put((Q_L2_local, Q_energy_local))
     N_PROCESSES = cpu_count()-1
     task_queue = Queue()
     done_queue = Queue()
@@ -158,7 +169,7 @@ def L2errorFEM(interpolants: np.array, Nsamples, Nx, transform, f:Callable, q, m
 
         # calculate interpolated fem coefficients at points
         fem_coefficients = np.empty((points.shape[0],Nx))
-        timestamp = time.time()
+        # timestamp = time.time()
         def evaluate(i, interpolant, points):
             coefs = interpolant(points)
             return i, coefs
@@ -179,8 +190,8 @@ def L2errorFEM(interpolants: np.array, Nsamples, Nx, transform, f:Callable, q, m
 
         # for i, interpolant in enumerate(interpolants):
         #     fem_coefficients[:,i] = interpolant(points)
-        duration = time.time() - timestamp
-        print(f"\t\t\tInterpolating coefficients took {duration:.2f}s.")
+        # duration = time.time() - timestamp
+        # print(f"\t\t\tInterpolating coefficients took {duration:.2f}s.")
 
         # at sampling points, calculate L2 distance between surrogate and FEM approximations
         points_splits = np.array_split(points, N_PROCESSES)
@@ -190,16 +201,19 @@ def L2errorFEM(interpolants: np.array, Nsamples, Nx, transform, f:Callable, q, m
             task_queue.put(task)
         processes = []
         for n in range(N_PROCESSES):
-            processes.append(Process(target=worker_L2error_to_fem, args=(task_queue, done_queue, ydim, Nx, transform, f, q)))
+            processes.append(Process(target=worker_error_to_fem, args=(task_queue, done_queue, ydim, Nx, transform, f, q)))
             processes[-1].start()
         for task in TASKS:
-            Qshifted[shift] += done_queue.get()
+            Q_L2_local, Q_energy_local = done_queue.get()
+            Q_L2_shifted[shift] += Q_L2_local
+            Q_energy_shifted[shift] += Q_energy_local
         for n in range(N_PROCESSES):
             task_queue.put('STOP')
         for process in processes:
             process.join()
-        Qshifted[shift] /= Nsamples
-    return np.mean(Qshifted)
+        Q_L2_shifted[shift] /= Nsamples
+        Q_energy_shifted[shift] /= Nsamples
+    return np.mean(Q_L2_shifted), np.mean(Q_energy_shifted)
 
 
 def run_bvp_experiment(exp_data):
@@ -232,10 +246,12 @@ def run_bvp_experiment(exp_data):
         elliptic_bvp = EllipticProblemQOI(dim, q=weights_decay[0])
         for idx_Ndesign, Ndesign in enumerate(Ndesign_list):
             print(f"\t\tNdesign {Ndesign}")
+            t1 = time.time()
             interpolants_design_shifts, errors_design_shifts = interpolate(elliptic_bvp, kernel, Ndesign, num_design_shifts, type_design_points)
             errors[idx_dim, idx_Ndesign]            = np.sqrt(np.mean(errors_design_shifts)) # shift-average error
             condition_numbers[idx_dim, idx_Ndesign] = np.mean([interpolants_design_shifts[j].condition_number for j in range(num_design_shifts)]) # shift-average condition number
-
+            duration = time.time() - t1
+            print(f"\t\tFinished with runtime {duration:.2f}")
     exp_data['error_data'] = errors
     exp_data['conditioning_data'] = condition_numbers
     
@@ -317,8 +333,6 @@ def run_multiplication_experiment(exp_data):
     type_design_points = exp_data.get('type_design_points', 'lattice')
     Ndesign = exp_data.get('Ndesign')
     
-
-    Nscaling_list = [10**N for N in range(5)]
     data = np.zeros((len(dim_list), num_test_functions))
     
     for idx_dim, dim in enumerate(dim_list):
@@ -327,13 +341,12 @@ def run_multiplication_experiment(exp_data):
         gamma = [1/j**weights_decay for j in range(1,dim+1)]
         kernel = kernel_class(dim, lengthscales=gamma)
         
-        # RKHS functions
+        # construct a number of random RKHS functions
         test_functions_list = []
         for i in range(num_test_functions):
             test_functions_list.append(TestFunction(kernel, dim, num_anchors=dim*10))
 
         for test_fct_idx, test_fct in enumerate(test_functions_list):
-        # try a number of random functions
             # interpolate non-squared function
             interpolant = KernelInterpolant(kernel, dim)
             interpolant.generate_design_points(Ndesign, method=type_design_points)
@@ -358,6 +371,17 @@ def run_multiplication_experiment(exp_data):
 
 
 def run_feminterpolation_experiment(exp_data):
+    def b(j, c, q):
+        a_min = 1-c/np.sqrt(6)*zeta(q)
+        return c*j**(-q)/(np.sqrt(6)*a_min)
+    def prod_weights(dim, q):
+        c = 0.2
+        p = 1/2.2
+        delta = 1e-6
+        sigma = 1
+        llambda = 1/(2/p - 1 - 2*sigma - 4*delta)
+        touchard_poly = get_touchard_polynomial(sigma)
+        return [(((j*sigma)**sigma*touchard_poly(b(j, c, q)))**2/(2*np.exp(1/np.e)*zeta(2*llambda)))**(1/(1+llambda)) for j in range(1,dim+1)]
     # setup from exp_data
     kernel_class = exp_data.get('kernel_class')
     dim_list = exp_data.get('dim_list')
@@ -373,29 +397,20 @@ def run_feminterpolation_experiment(exp_data):
         TypeError('weights_decay has to be a number or a tuple/list/np.array of two numbers')
     error_samples = 2**10
     stochastic_transform_name = exp_data.get('stochastic_transform', 'uniform').lower()
-    if stochastic_transform_name == 'uniform':
-        stochastic_transform = EllipticProblemFE.transform_uniform
-    elif stochastic_transform_name == 'arcsin' or stochastic_transform_name == 'arcsine':
-        stochastic_transform = EllipticProblemFE.transform_arcsin
-    elif stochastic_transform_name == 'lognormal':
-        lognormal_parameters = exp_data.get('lognormal_parameters', [0, 1/2])
-        mu    = lognormal_parameters[0]
-        sigma = lognormal_parameters[1]
-        stochastic_transform = lambda y: EllipticProblemFE.transform_lognormal(y, mu, sigma)
 
     # interpolation
-    errors = np.empty((len(dim_list), len(Ndesign_list)))
+    errors = np.empty((len(dim_list), len(Ndesign_list), 2)) # last axis is to distinguish L2 and energy errors
     for idx_dim, dim in enumerate(dim_list):
         print(f"\tDimension {dim}")
-        elliptic_bvp_fe = EllipticProblemFE(dim, meshsize, transform=stochastic_transform, f=lambda x: x[0], q=weights_decay[0])
-        gamma = [1/j**weights_decay[1] for j in range(1,dim+1)]
+        elliptic_bvp_fe = EllipticProblemFE(dim, meshsize, stochastic_transform_name, f=lambda x: x[0], q=weights_decay[0])
+        gamma = prod_weights(dim, weights_decay[1])
         kernel = kernel_class(dim, lengthscales=gamma)
         for idx_Ndesign, Ndesign in enumerate(Ndesign_list):
             print(f"\t\tNdesign {Ndesign}")
             interpolants = interpolate_multivar(elliptic_bvp_fe, meshsize, kernel, Ndesign, num_design_shifts, type_design_points)
             timestamp = time.time()
-            errors[idx_dim, idx_Ndesign] = \
-                np.sqrt(np.mean([L2errorFEM(interpolants[design_shift,:], error_samples, meshsize, stochastic_transform, elliptic_bvp_fe.f, elliptic_bvp_fe.q, qmc_shifts=num_error_shifts) for design_shift in range(num_design_shifts)]))
+            errors[idx_dim, idx_Ndesign, :] = \
+                np.sqrt(np.mean([errorsFEM(interpolants[design_shift,:], error_samples, meshsize, stochastic_transform_name, elliptic_bvp_fe.f, elliptic_bvp_fe.q, qmc_shifts=num_error_shifts) for design_shift in range(num_design_shifts)], axis=0))
             print(f"\t\tFinished error sampling with {(time.time() - timestamp):.1f}s runtime.")
     exp_data['error_data'] = errors
     return exp_data

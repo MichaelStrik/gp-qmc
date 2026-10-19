@@ -1,4 +1,3 @@
-from collections.abc import Callable
 import numpy as np
 from scipy.integrate import solve_bvp, quad
 from scipy.stats import Normal
@@ -130,7 +129,7 @@ class TestFunction:
 
 
 class EllipticProblemQOI:
-    def __init__(self, dim, f = lambda x: np.zeros_like(x), q=4/3):
+    def __init__(self, dim, f = lambda x: x, q=4/3):
         self.dim = dim
         self.f = f
         self.q = q
@@ -164,7 +163,7 @@ class EllipticProblemQOI:
         """
         def rhs(x, u):
             u0 = u[[1]]
-            u1 = (self.f(x) - self.dx_a(x,y))/self.a(x,y)
+            u1 = -(self.f(x) + self.dx_a(x,y))/self.a(x,y)
             return np.vstack((u0, u1))
 
         def bc(ya, yb):
@@ -199,6 +198,7 @@ class EllipticProblemQOI:
             u_sol = lambda x: solobj.sol(x)[0]
             res = quad(u_sol, a=1/8, b=3/8)[0]
             return idx, res
+        processes = []
         N_PROCESSES = cpu_count() - 1
         task_queue = Queue()
         done_queue = Queue()
@@ -206,12 +206,15 @@ class EllipticProblemQOI:
         for task in TASKS:
             task_queue.put(task)
         for i in range(N_PROCESSES):
-            Process(target=worker, args=(task_queue, done_queue)).start()
+            processes.append(Process(target=worker, args=(task_queue, done_queue)))
+            processes[-1].start()
         for task in TASKS:
             idx, res = done_queue.get()
             qoi[idx] = res
-        for i in range(N_PROCESSES):
+        for process in processes:
             task_queue.put('STOP')
+        for process in processes:
+            process.join()
 
         # for row in range(y_rows):
         #     solobj = self.solve(y[row,:])
@@ -222,7 +225,7 @@ class EllipticProblemQOI:
 
 
 class EllipticProblemFE:
-    def __init__(self, ydim, Nx, transform=None, f = lambda x: x[0], q=4/3):
+    def __init__(self, ydim, Nx, coefficients_type="uniform", f = lambda x: x[0], q=4/3):
         # spaces
         domain = mesh.create_unit_interval(MPI.COMM_SELF, Nx-1)
         V = fem.functionspace(domain, ("Lagrange", 1))
@@ -245,9 +248,19 @@ class EllipticProblemFE:
         self.V = V
         self.bc = bc
         self.Nx = Nx
-        if transform is None:
-            transform = self.transform_uniform
-        self.transform = transform
+
+        # set transform for parametrization of coefficients
+        self.coefficents_type = coefficients_type
+        if type(coefficients_type) == str:
+            coefficients_type = coefficients_type.lower()
+        if coefficients_type=="uniform":
+            self.transform = self.transform_uniform
+        elif coefficients_type=="arcsine" or coefficients_type=="arcsin":
+            self.transform = self.transform_arcsine
+        elif coefficients_type=="lognormal":
+            self.transform = self.transform_normal
+        else:
+            raise TypeError("Coefficient type not known.")
 
         # define variational form
         # functions
@@ -265,17 +278,23 @@ class EllipticProblemFE:
         self.u_hn   = fem.Function(V) # surrogate/interpolated solution
         self.u_err  = fem.Function(V)
         self.L2error_form = fem.form(ufl.inner(self.u_err, self.u_err)*ufl.dx)
+        self.energy_error_form= fem.form(self.c*ufl.dot(ufl.grad(self.u_err), ufl.grad(self.u_err)) * ufl.dx)
 
 
     # fem solver
     def c_fun(self, x, y):
+        c = 0.2
         q = self.q
         pi = np.pi
         dim = self.dim
-
+        def psi(x, j, c, q): # c isn't related to c_fun, this is not a good naming but the constant doesn't appear in a lot of places
+            return c*j**(-q)*np.sin(np.sin(j*pi*x[0]))
         diffusion = 1
-        for j in range(dim):
-            diffusion += y[j]/(1+(j*pi)**q)*np.sin(j*pi*x[0])
+        for j in range(1,dim+1):
+            diffusion += 1/np.sqrt(6)*y[j-1]*psi(x,j,c,q)
+
+        if self.transform == "lognormal":
+            return np.exp(diffusion)
         return diffusion
     
     @staticmethod
@@ -283,13 +302,13 @@ class EllipticProblemFE:
         return y
     
     @staticmethod
-    def transform_arcsin(y):
+    def transform_arcsine(y):
         return np.sin(2*np.pi*y)
     
     @staticmethod
-    def transform_lognormal(y, mu, sigma):
-        X = Normal(mu=0,sigma=1)
-        return np.exp(mu + sigma*X.icdf(y))
+    def transform_normal(y, mu=0.0, sigma=1.0):
+        X = Normal(mu=mu,sigma=sigma)
+        return X.icdf(y)
 
     def set_lognormal_parameters(self, mu, sigma):
         self.mu_lognormal = mu
@@ -314,13 +333,18 @@ class EllipticProblemFE:
         return problem
 
 
-    def L2error_to_fem(self, y, dof_coefficients):
+    def error_to_fem(self, y, dof_coefficients):
         self.u_h.interpolate(self.solve(y).u)           # solve pde. interpolation is exact
+        # construct error function
         self.u_err.x.array[:] = self.u_h.x.array - dof_coefficients
-        error_local = fem.assemble_scalar(self.L2error_form)
-        L2error = np.sqrt(self.domain.comm.allreduce(error_local, op=MPI.SUM))
+        # L2 error
+        L2_error_local = fem.assemble_scalar(self.L2error_form)
+        L2error = np.sqrt(self.domain.comm.allreduce(L2_error_local, op=MPI.SUM))
+        # energy error
+        energy_error_local = fem.assemble_scalar(self.energy_error_form)
+        energy_error = np.sqrt(self.domain.comm.allreduce(energy_error_local, op=MPI.SUM))
 
-        return L2error
+        return L2error, energy_error
 
 
     def __call__(self, y):
@@ -334,8 +358,8 @@ class EllipticProblemFE:
         
         fem_coefficients = np.zeros((y_rows, self.Nx))
 
-        def pde_worker(input, output, ydim, Nx, transform, f, q):
-            elliptic_problem = EllipticProblemFE(ydim, Nx, transform, f, q)
+        def pde_worker(input, output, ydim, Nx, coefficents_type, f, q):
+            elliptic_problem = EllipticProblemFE(ydim, Nx, coefficents_type, f, q)
             for row_idx, y in iter(input.get, 'STOP'):
                 sol = elliptic_problem.solve(y)
                 coefficients = np.array(sol.x)
@@ -348,7 +372,7 @@ class EllipticProblemFE:
         for task in TASKS:
             task_queue.put(task)
         for n in range(N_PROCESSES):
-            processes.append(Process(target=pde_worker, args=(task_queue, done_queue, self.dim, self.Nx, self.transform, self.f, self.q)))
+            processes.append(Process(target=pde_worker, args=(task_queue, done_queue, self.dim, self.Nx, self.coefficents_type, self.f, self.q)))
             processes[-1].start()
         for task in TASKS:
             row_idx, coefs = done_queue.get()

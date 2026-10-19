@@ -162,31 +162,49 @@ class KernelInterpolant:
         # shift-average qmc estimator
         Q_s = np.zeros(qmc_shifts)
         L2norm_squared = 0
-        def calc_d(pts):
-            target_eval = target(pts)
-            self_eval = self(pts)
-            d = target_eval - self_eval
-            return np.sum(d**2), np.sum(target_eval**2)
-        N_PROCESSES = 1#cpu_count()
-        task_queue = Queue()
-        done_queue = Queue()
+
         for r in range(qmc_shifts):
             points = point_sets[r,:,:]
-            points_subviews = np.array_split(points, N_PROCESSES)
-            TASKS = [(calc_d, (pts,)) for pts in points_subviews]
-            for task in TASKS:
-                task_queue.put(task)
-            for i in range(N_PROCESSES):
-                Process(target=worker, args=(task_queue, done_queue)).start()
-            for i in range(len(TASKS)):
-                d_squared, target_eval_squared = done_queue.get()
-                Q_s[r] += d_squared
-                L2norm_squared += target_eval_squared
-            for i in range(N_PROCESSES):
-                task_queue.put('STOP')
-            Q_s[r] /= Nsamples
-            L2norm_squared /= Nsamples
+            target_eval = target(points)
+            self_eval = self(points)
+            d = target_eval - self_eval
+            Q_s[r] += np.sum(d**2)/Nsamples
+            L2norm_squared += np.sum(target_eval**2)/Nsamples
+
         abserror_squared = np.mean(Q_s)
+
+
+        # def calc_d(pts):
+        #     target_eval = target(pts)
+        #     self_eval = self(pts)
+        #     d = target_eval - self_eval
+        #     print("I'm an error sampling worker")
+        #     return np.sum(d**2), np.sum(target_eval**2)
+        # processes = []
+        # N_PROCESSES = 1#cpu_count()
+        # task_queue = Queue()
+        # done_queue = Queue()
+        # for r in range(qmc_shifts):
+        #     points = point_sets[r,:,:]
+        #     points_subviews = np.array_split(points, N_PROCESSES)
+        #     TASKS = [(calc_d, (pts,)) for pts in points_subviews]
+        #     for task in TASKS:
+        #         task_queue.put(task)
+        #     for i in range(N_PROCESSES):
+        #         processes.append(Process(target=worker, args=(task_queue, done_queue)))
+        #         processes[-1].start()
+        #     for i in range(len(TASKS)):
+        #         d_squared, target_eval_squared = done_queue.get()
+        #         Q_s[r] += d_squared
+        #         L2norm_squared += target_eval_squared
+        #     for process in processes:
+        #         task_queue.put('STOP')
+        #     for process in processes:
+        #         process.join()
+        #     print("Workers joined")
+        #     Q_s[r] /= Nsamples
+        #     L2norm_squared /= Nsamples
+        # abserror_squared = np.mean(Q_s)
         
         if type(normalisation) is str and normalisation.upper() == 'L2':
             normalisation = L2norm_squared
