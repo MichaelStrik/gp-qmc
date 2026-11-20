@@ -291,7 +291,7 @@ class EllipticProblemFE:
             return c*j**(-q)*np.sin(np.sin(j*pi*x[0]))
         diffusion = 1
         for j in range(1,dim+1):
-            diffusion += 1/np.sqrt(6)*y[j-1]*psi(x,j,c,q)
+            diffusion += y[j-1]*psi(x,j,c,q)
 
         if self.transform == "lognormal":
             return np.exp(diffusion)
@@ -303,7 +303,7 @@ class EllipticProblemFE:
     
     @staticmethod
     def transform_arcsine(y):
-        return np.sin(2*np.pi*y)
+        return 1/np.sqrt(6)*np.sin(2*np.pi*y)
     
     @staticmethod
     def transform_normal(y, mu=0.0, sigma=1.0):
@@ -392,22 +392,22 @@ if __name__ == '__main__':
     # kernel
     from kernels import UnanchoredSobolevKernel, AnchoredSobolevKernel
 
-    def buildTestFunction(kernel_class, dim=2, lengthscales=[1, 0.5], num_anchors=10):
-        kernel = kernel_class(dim, lengthscales=lengthscales)
+    def buildTestFunction(kernel_class, dim=2, weights_dimension=[1, 0.5], num_anchors=10):
+        kernel = kernel_class(dim, weights_dimension=weights_dimension)
         return TestFunction(kernel, dim, num_anchors)
 
     dim = 2
-    lengthscales=[1, 0.5]
+    weights_dimension=[1, 0.5]
     
     # build test function with unanchored kernel
     print(f"Building test function based on {UnanchoredSobolevKernel.__name__}.")
-    test_function = buildTestFunction(UnanchoredSobolevKernel, dim, lengthscales, num_anchors=2)
+    test_function = buildTestFunction(UnanchoredSobolevKernel, dim, weights_dimension, num_anchors=2)
     print("Done.")
 
 
     # build test function with unanchored kernel
     print(f"Building test function based on {AnchoredSobolevKernel.__name__}.")
-    test_function = buildTestFunction(AnchoredSobolevKernel, dim, lengthscales, num_anchors=2)
+    test_function = buildTestFunction(AnchoredSobolevKernel, dim, weights_dimension, num_anchors=2)
     print("Done.")
 
 
@@ -438,7 +438,7 @@ if __name__ == '__main__':
     # 1d test
     kernel_class = AnchoredSobolevKernel
     print(f"Building test function based on {kernel_class.__name__}.")
-    test_function = buildTestFunction(kernel_class, dim=1, lengthscales=[1], num_anchors=2)
+    test_function = buildTestFunction(kernel_class, dim=1, weights_dimension=[1], num_anchors=2)
     
     X = np.linspace(0,1, 1000)
     Y = test_function(X[:,None])

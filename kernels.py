@@ -8,20 +8,20 @@ import numpy as np
 class AbstractWeightedKernel:
     """
     Abstract class for kernels with product weights or with product and order dependent (POD) weights. 
-    For the product case, one only needs to specify weights for each individual dimension (dimension_weights),
+    For the product case, one only needs to specify weights for each individual dimension (weights_dimension),
     whereas for the POD case, there should also be specified weights for every order (cardinality of a set of dimensions).
-    The type of weights will be inferred automatically from he datatype of order_weights.
+    The type of weights will be inferred automatically from he datatype of weights_order.
     """
     def __init__(self,
                 d,
                 scale = 1.,
-                dimension_weights = 1.,
-                order_weights = 1.
+                weights_dimension = 1.,
+                weights_order = 1.
                 ):
         self.d = d
         self.scale = scale
-        self.dimension_weights = dimension_weights
-        self.order_weights = order_weights
+        self.weights_dimension = weights_dimension
+        self.weights_order = weights_order
         self.P_table = None
 
 
@@ -37,7 +37,7 @@ class AbstractWeightedKernel:
 
     def combine_per_dim_components(self, kperdim):
         scale = self.scale
-        weights = self.dimension_weights
+        weights = self.weights_dimension
         k = scale * ((1+weights*kperdim).prod(-1))
         return k
     
@@ -51,14 +51,14 @@ class AbstractWeightedKernel:
         else:
             if not np.any(np.isnan(self.P_table[s,l,...])):
                 return self.P_table[s,l,...]
-            P = self.P(x0,x1,s-1,l) + self.dimension_weights[s-1]*self.eta(x0[...,s-1],x1[...,s-1])*self.P(x0,x1,s-1,l-1)
+            P = self.P(x0,x1,s-1,l) + self.weights_dimension[s-1]*self.eta(x0[...,s-1],x1[...,s-1])*self.P(x0,x1,s-1,l-1)
             self.P_table[s,l,...] = P
             return P
         
     
     def sum_P(self,x0,x1):
         d = self.d
-        order_weights = self.order_weights
+        weights_order = self.weights_order
         # allocate P_table
         if x0.ndim==3 and x1.ndim==3:
             n = np.max(x0.shape[:-1])
@@ -81,7 +81,7 @@ class AbstractWeightedKernel:
         k = 0
         scale = self.scale
         for l in range(d+1):
-            k += scale*order_weights[l]*self.P(x0,x1,d,l)
+            k += scale*weights_order[l]*self.P(x0,x1,d,l)
         self.P_table = None
 
         return k
@@ -91,7 +91,7 @@ class AbstractWeightedKernel:
         # assertions
         # TODO
 
-        if np.isscalar(self.order_weights):
+        if np.isscalar(self.weights_order):
             # product weights
             kperdim = self.get_per_dim_components(x0,x1)
             k = self.combine_per_dim_components(kperdim)
@@ -101,7 +101,55 @@ class AbstractWeightedKernel:
             return self.sum_P(x0,x1)
 
 
-class UnanchoredSobolevKernel(AbstractSIDSIKernel):
+class UnanchoredSobolevKernel(AbstractWeightedKernel):
+        def eta(self,x0,x1):
+            # one-dimensional for now, without broadcasting
+            return 1/2*(np.abs(x0-x1)**2 -np.abs(x0-x1) +1/6) +(x0-1/2)*(x1-1/2)
+
+
+class AnchoredSobolevKernel(AbstractWeightedKernel):
+        def __init__(
+                self, 
+                d,
+                scale = 1.,
+                weights_dimension = 1.,
+                weights_order = 1.,
+                anchor=0.
+            ):
+            super().__init__(
+                d=d,
+                scale=scale,
+                weights_dimension=weights_dimension,
+                weights_order=weights_order
+            )
+            self.anchor = anchor
+        
+        def eta(self, x0, x1):
+            """
+            Computes eta as in [1, Chapter 4.2] per dimension. 
+            
+            Args:
+                x0: np.array
+                Column vector or scalar
+                
+                x1: np.array
+                Column vector or scalar
+
+            [1] J. Dick, F. Kuo and I. Sloan: High-dimensional integration: The quasi-Monte Carlo way. In: Acta Numerica 22 (2013), pp. 133-288
+            """
+            c = self.anchor
+            output = np.zeros_like(x0+x1) # have to use the shape that results after broadcasting
+
+            both_greater = np.logical_and(x0 > c, x1 > c)
+            both_smaller = np.logical_and(x0 < c, x1 < c)
+
+            output = np.where(both_greater, np.minimum(x0,x1) - c, output)
+            output = np.where(both_smaller, c - np.maximum(x0,x1), output)
+
+            return output
+
+
+class UnanchoredSobolevKernelOld(AbstractSIDSIKernel):
     """Represents the reproducing kernel of the weighted unanchored Sobolev space.
 
     Can evaluate the kernel for a given pair of points, dimension, weights, etc.
@@ -180,7 +228,7 @@ class UnanchoredSobolevKernel(AbstractSIDSIKernel):
 
 
 
-class AnchoredSobolevKernel(AbstractSIDSIKernel):
+class AnchoredSobolevKernelOld(AbstractSIDSIKernel):
     """Represents the reproducing kernel of the weighted anchored Sobolev space.
 
     Can evaluate the kernel for a given pair of points, dimension, weights, etc.
@@ -395,7 +443,7 @@ if __name__ == '__main__':
             # one-dimensional for now, without broadcasting
             return 1/2*(np.abs(x0-x1)**2 -np.abs(x0-x1) +1/6) +(x0-1/2)*(x1-1/2)
 
-    kernel = PODWeightsUnanchoredSobolevKernel(d=2, dimension_weights=[1,2])
+    kernel = PODWeightsUnanchoredSobolevKernel(d=2, weights_dimension=[1,2])
     test(kernel)
 
     # print("Step by step")
@@ -404,7 +452,7 @@ if __name__ == '__main__':
     # kperdim = kernel.get_per_dim_components(x0,x1)
     # kperdimOld = kernelOld.get_per_dim_components(x0,x1,[],[])
     # print(f"kperdim = {kperdim}, kperdimOld = {kperdimOld}")
-    # weights = kernel.dimension_weights
+    # weights = kernel.weights_dimension
     # print(f"Manually: {(1+weights*kperdim).prod(-1)}")
     # print(f"Kernel: {kernel(x0,x1)}")
     # kernelOld(x0,x1)

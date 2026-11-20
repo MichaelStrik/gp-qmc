@@ -63,13 +63,20 @@ def interpolate_multivar(test_function, output_dim, kernel, Ndesign, num_design_
         xdesigns[shift] = interpolant.xdesign
         ydesigns[shift] = test_function(interpolant.xdesign)
     # build interpolants in parallel
-    N_PROCESSES = 1#cpu_count()
+    if output_dim*num_design_shifts > 0.7*cpu_count():
+        # process-level parallelism
+        N_PROCESSES = cpu_count()
+        threadlimit = 1
+    else:
+        # thread-level parallelism
+        N_PROCESSES = 1
+        threadlimit = cpu_count()
     task_queue = Queue()
     done_queue = Queue()
     def generate_interpolant(interpolant, xdesign, ydesign, shift, outdim):
         interpolant.xdesign = xdesign
         interpolant.ydesign = ydesign
-        interpolant.build_interpolant()
+        interpolant.build_interpolant(threadlimit)
         return interpolant, shift, outdim
     TASKS = [(generate_interpolant, (KernelInterpolant(kernel, input_dim), xdesigns[shift], ydesigns[shift,:,outdim], shift, outdim)) for (shift, outdim) in itertools.product(range(num_design_shifts), range(output_dim))]
     for task in TASKS:
@@ -115,7 +122,7 @@ def errorsFEM(interpolants: np.array, Nsamples, Nx, transform, f:Callable, q, me
         Number of samples.
 
         Nx : int 
-        Degree of freedoms of finite element method.
+        Degrees of freedom of finite element method.
 
         f : Callable
         PDE right-hand-side
@@ -234,14 +241,14 @@ def run_bvp_experiment(exp_data):
 
     if isinstance(weights_decay, Number):
         weights_decay = (weights_decay, weights_decay)
-    elif type(weights_decay) not in [tuple, list, np.array]:
+    elif type(weights_decay) not in [tuple, list, np.ndarray]:
         TypeError('weights_decay has to be a number or a tuple/list/np.array of two numbers')
 
     # experiment
     for idx_dim, dim in enumerate(dim_list):
         print(f"\tDimension {dim}")
         gamma = [1/j**weights_decay[1] for j in range(1,dim+1)]
-        kernel = kernel_class(dim, lengthscales=gamma)
+        kernel = kernel_class(dim, weights_dimension=gamma)
 
         elliptic_bvp = EllipticProblemQOI(dim, q=weights_decay[0])
         for idx_Ndesign, Ndesign in enumerate(Ndesign_list):
@@ -276,7 +283,7 @@ def run_experiment(exp_data):
     # experiment
     for idx_dim, dim in enumerate(dim_list):
         gamma = [1/j**weights_decay for j in range(1,dim+1)]
-        kernel = kernel_class(dim, lengthscales=gamma)
+        kernel = kernel_class(dim, weights_dimension=gamma)
         test_function_list = []
         for i in range(num_test_functions):
             test_function_list.append(TestFunction(kernel, dim, num_anchors))
@@ -311,7 +318,7 @@ def run_condition_experiment(kernel_class, dim_list, Ndesign_list, num_design_sh
         for idx_Ndesign, Ndesign in enumerate(Ndesign_list):
             print(f"\tNdesign {Ndesign}")
             gamma = [1/j**weights_decay for j in range(1,dim+1)]
-            kernel = kernel_class(dim, lengthscales=gamma)
+            kernel = kernel_class(dim, weights_dimension=gamma)
 
             interpolant = KernelInterpolant(kernel, dim)
             interpolant.generate_design_points(Ndesign, method=type_design_points)
@@ -339,7 +346,7 @@ def run_multiplication_experiment(exp_data):
         print(f"dim {dim}")
         # kernel
         gamma = [1/j**weights_decay for j in range(1,dim+1)]
-        kernel = kernel_class(dim, lengthscales=gamma)
+        kernel = kernel_class(dim, weights_dimension=gamma)
         
         # construct a number of random RKHS functions
         test_functions_list = []
@@ -404,7 +411,7 @@ def run_feminterpolation_experiment(exp_data):
         print(f"\tDimension {dim}")
         elliptic_bvp_fe = EllipticProblemFE(dim, meshsize, stochastic_transform_name, f=lambda x: x[0], q=weights_decay[0])
         gamma = prod_weights(dim, weights_decay[1])
-        kernel = kernel_class(dim, lengthscales=gamma)
+        kernel = kernel_class(dim, weights_dimension=gamma)
         for idx_Ndesign, Ndesign in enumerate(Ndesign_list):
             print(f"\t\tNdesign {Ndesign}")
             interpolants = interpolate_multivar(elliptic_bvp_fe, meshsize, kernel, Ndesign, num_design_shifts, type_design_points)

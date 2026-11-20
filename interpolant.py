@@ -82,15 +82,14 @@ class KernelInterpolant:
             self.xdesign = rng.uniform(0, 1, size=(Ndesign, self.dim))
 
 
-    def build_interpolant(self):
+    def build_interpolant(self, threadlimit=cpu_count()):
         """Builds the kernel based interpolant.
         """ 
         # print(f"Condition number: {self.condition_number:.2e}")
-        K = self.kernel(self.xdesign[:,np.newaxis,:], self.xdesign[np.newaxis,:,:])
-        with threadpool_limits(limits=cpu_count()-1):
+        with threadpool_limits(limits=threadlimit):
+            K = self.kernel(self.xdesign[:,np.newaxis,:], self.xdesign[np.newaxis,:,:])
             self.condition_number = np.linalg.cond(K)
             alpha = np.linalg.solve(K,self.ydesign)
-    
         self.alpha = alpha
 
 
@@ -143,16 +142,13 @@ class KernelInterpolant:
         """
         method = method.lower()
         assert method in ['mc', 'lattice', 'digital_net']
-        
+
+        # mc
         if method == 'mc':
             rng = np.random.default_rng()
             point_sets = rng.uniform(0, 1, size=(Nsamples, self.dim))
             point_sets = point_sets[np.newaxis,:,:]
             qmc_shifts = 1
-            # target_eval = target(point_set)
-            # d = self(point_set) - target_eval
-            # abserror_squared = np.sum(d**2)/Nsamples
-            # L2norm_squared = np.sum(target_eval**2)/Nsamples
         # qmc
         elif method == 'lattice' or method == 'digital_net':
             qmcGens = {'lattice': qmcpy.Lattice, 'digital_net': qmcpy.DigitalNetB2}
@@ -224,8 +220,8 @@ if __name__ == '__main__':
     d = 25
     Ndesign = 256
     weights_decay = 2.5
-    unanc_sob_kernel = UnanchoredSobolevKernel(d, lengthscales=[1/j**weights_decay for j in range(1,d+1)])
-    anc_sob_kernel = AnchoredSobolevKernel(d, lengthscales=[1/j**weights_decay for j in range(1,d+1)])
+    unanc_sob_kernel = UnanchoredSobolevKernel(d, weights_dimension=[1/j**weights_decay for j in range(1,d+1)])
+    anc_sob_kernel = AnchoredSobolevKernel(d, weights_dimension=[1/j**weights_decay for j in range(1,d+1)])
 
     # construct qmc points
     print("Constructing QMC points.")
