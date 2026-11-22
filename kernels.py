@@ -1,11 +1,12 @@
-# qmcpy
+from abc import ABC, abstractmethod
+
+import numpy as np
 from qmcpy.kernel.si_dsi_kernels import AbstractSIDSIKernel
 from qmcpy.util.shift_invar_ops import bernoulli_poly
 from qmcpy.util.transforms import tf_exp_eps,tf_exp_eps_inv
-import numpy as np
 
 
-class AbstractWeightedKernel:
+class AbstractWeightedKernel(ABC):
     """
     Abstract class for kernels with product weights or with product and order dependent (POD) weights. 
     For the product case, one only needs to specify weights for each individual dimension (weights_dimension),
@@ -24,23 +25,20 @@ class AbstractWeightedKernel:
         self.weights_order = weights_order
         self.P_table = None
 
-
+    @abstractmethod
     def eta(self,x,y):
-        raise NotImplementedError
-
+        pass
 
     # PRODUCT WEIGHTS
     def get_per_dim_components(self, x0, x1):
         kperdim = np.stack([self.eta(x0[...,j], x1[...,j]) for j in range(self.d)],-1)
         return kperdim
-    
 
     def combine_per_dim_components(self, kperdim):
         scale = self.scale
         weights = self.weights_dimension
         k = scale * ((1+weights*kperdim).prod(-1))
         return k
-    
 
     # POD WEIGHTS
     def P(self,x0,x1,s,l):
@@ -54,7 +52,6 @@ class AbstractWeightedKernel:
             P = self.P(x0,x1,s-1,l) + self.weights_dimension[s-1]*self.eta(x0[...,s-1],x1[...,s-1])*self.P(x0,x1,s-1,l-1)
             self.P_table[s,l,...] = P
             return P
-        
     
     def sum_P(self,x0,x1):
         d = self.d
@@ -86,7 +83,6 @@ class AbstractWeightedKernel:
 
         return k
 
-
     def __call__(self, x0, x1):
         # assertions
         # TODO
@@ -101,10 +97,12 @@ class AbstractWeightedKernel:
             return self.sum_P(x0,x1)
 
 
+
 class UnanchoredSobolevKernel(AbstractWeightedKernel):
         def eta(self,x0,x1):
             # one-dimensional for now, without broadcasting
             return 1/2*(np.abs(x0-x1)**2 -np.abs(x0-x1) +1/6) +(x0-1/2)*(x1-1/2)
+
 
 
 class AnchoredSobolevKernel(AbstractWeightedKernel):
@@ -147,6 +145,7 @@ class AnchoredSobolevKernel(AbstractWeightedKernel):
             output = np.where(both_smaller, c - np.maximum(x0,x1), output)
 
             return output
+
 
 
 class UnanchoredSobolevKernelOld(AbstractSIDSIKernel):
