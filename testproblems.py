@@ -4,7 +4,7 @@ from scipy.stats import Normal
 # parallel
 from multiprocess import Process, Queue
 from os import cpu_count
-
+# fem
 import ufl
 from mpi4py import MPI
 from dolfinx import fem
@@ -224,12 +224,12 @@ class EllipticProblemQOI:
         return qoi
 
 
+
 class EllipticProblemFE:
     def __init__(self, ydim, Nx, coefficients_type="uniform", f = lambda x: x[0], q=4/3):
         # spaces
         domain = mesh.create_unit_interval(MPI.COMM_SELF, Nx-1)
         V = fem.functionspace(domain, ("Lagrange", 1))
-
         # boundary conditions
         uD = fem.Constant(domain, default_scalar_type(0.0))
         tdim = domain.topology.dim
@@ -238,17 +238,14 @@ class EllipticProblemFE:
         boundary_facets = mesh.exterior_facet_indices(domain.topology)
         boundary_dofs = fem.locate_dofs_topological(V, fdim, boundary_facets)
         bc = fem.dirichletbc(uD, boundary_dofs, V)
-
         # class attributes
         self.dim = ydim
         self.f = f
         self.q = q
-
         self.domain = domain
         self.V = V
         self.bc = bc
         self.Nx = Nx
-
         # set transform for parametrization of coefficients
         self.coefficents_type = coefficients_type
         if type(coefficients_type) == str:
@@ -261,7 +258,6 @@ class EllipticProblemFE:
             self.transform = self.transform_normal
         else:
             raise TypeError("Coefficient type not known.")
-
         # define variational form
         # functions
         self.c = fem.Function(V) # spatially varying coefficient function
@@ -272,14 +268,12 @@ class EllipticProblemFE:
         # formulation
         self.a = self.c*ufl.dot(ufl.grad(self.u), ufl.grad(self.v)) * ufl.dx
         self.L = self.f_ufl * self.v * ufl.dx
-
         # error computation
         self.u_h    = fem.Function(V) # fem solution
         self.u_hn   = fem.Function(V) # surrogate/interpolated solution
         self.u_err  = fem.Function(V)
         self.L2error_form = fem.form(ufl.inner(self.u_err, self.u_err)*ufl.dx)
         self.energy_error_form= fem.form(self.c*ufl.dot(ufl.grad(self.u_err), ufl.grad(self.u_err)) * ufl.dx)
-
 
     # fem solver
     def c_fun(self, x, y):
@@ -292,7 +286,6 @@ class EllipticProblemFE:
         diffusion = 1
         for j in range(1,dim+1):
             diffusion += y[j-1]*psi(x,j,c,q)
-
         if self.transform == "lognormal":
             return np.exp(diffusion)
         return diffusion
@@ -314,7 +307,6 @@ class EllipticProblemFE:
         self.mu_lognormal = mu
         self.sigma_lognormal = sigma
     
-
     def solve(self, y):
         # compute coefficients
         y = self.transform(y)
@@ -329,9 +321,7 @@ class EllipticProblemFE:
             petsc_options_prefix="Poisson",
         )
         problem.solve()
-
         return problem
-
 
     def error_to_fem(self, y, dof_coefficients):
         self.u_h.interpolate(self.solve(y).u)           # solve pde. interpolation is exact
@@ -346,7 +336,6 @@ class EllipticProblemFE:
 
         return L2error, energy_error
 
-
     def __call__(self, y):
         if y.ndim == 1:
             y = y[np.newaxis,:]
@@ -354,7 +343,7 @@ class EllipticProblemFE:
             y_cols = y.shape[1]
         elif y.ndim==2:
             y_rows, y_cols = y.shape
-        assert y_cols == self.dim
+        assert y_cols == self.ydim
         
         fem_coefficients = np.zeros((y_rows, self.Nx))
 
@@ -384,6 +373,7 @@ class EllipticProblemFE:
 
         return fem_coefficients
 
+    
 
 if __name__ == '__main__':
     # visuals
