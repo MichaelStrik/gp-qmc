@@ -279,10 +279,9 @@ class EllipticProblemFE:
     def c_fun(self, x, y):
         c = 0.2
         q = self.q
-        pi = np.pi
         dim = self.dim
         def psi(x, j, c, q): # c isn't related to c_fun, this is not a good naming but the constant doesn't appear in a lot of places
-            return c*j**(-q)*np.sin(np.sin(j*pi*x[0]))
+            return c*j**(-q)*np.sin(j*np.pi*x[0])
         diffusion = 1
         for j in range(1,dim+1):
             diffusion += y[j-1]*psi(x,j,c,q)
