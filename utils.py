@@ -34,6 +34,7 @@ def worker(input, output):
         result = func(*args)
         output.put(result)
 
+
 def get_touchard_polynomial(sigma):
     def get_touchard_coefs(n):
         return np.array([stirling2(n, k) for k in range(n+1)])

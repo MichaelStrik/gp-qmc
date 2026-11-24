@@ -85,8 +85,7 @@ class KernelInterpolant:
     def build_interpolant(self, threadlimit=cpu_count()):
         """Builds the kernel based interpolant.
         """ 
-        # print(f"Condition number: {self.condition_number:.2e}")
-        with threadpool_limits(limits=threadlimit):
+        with threadpool_limits(limits=min(cpu_count(),threadlimit)):
             K = self.kernel(self.xdesign[:,np.newaxis,:], self.xdesign[np.newaxis,:,:])
             self.condition_number = np.linalg.cond(K)
             alpha = np.linalg.solve(K,self.ydesign)

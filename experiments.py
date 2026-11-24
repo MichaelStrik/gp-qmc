@@ -1,19 +1,329 @@
-import pickle
-from numbers import Number
-from collections.abc import Callable
-from os import cpu_count
-import time
 import itertools
+import time
+from os import cpu_count
+import pickle
+from abc import ABC, abstractmethod
+from collections.abc import Callable
+from numbers import Number
 
-from multiprocess import Process, Queue
 import numpy as np
-from scipy.special import zeta
 import qmcpy
+from scipy.special import zeta
+from multiprocess import Process, Queue
 
 from kernels import UnanchoredSobolevKernel, AnchoredSobolevKernel
 from interpolant import KernelInterpolant
 from testproblems import TestFunction, EllipticProblemQOI, EllipticProblemFE
 from utils import worker, get_touchard_polynomial
+
+
+class AbstractExperiment(ABC):
+    """
+    Abstract class implementing the procedure of high-dimensional kernel interpolation experiment.
+
+    The experiment configuration is obtained from experiment_data. The core functionality is run_experiment which 
+    for every dimensionality in experiment_data["dim_list"] and every number of design points in experiment_data["Ndesign_list"]
+    constructs a design and an interpolant for a (possibly multivariate) target for which then error data is computed. Several
+    error data can be computed for one interpolant, which is to be specified by error_length.
+
+    Attributes:
+        experiment_data : dict
+            Experiment configuration data like, e.g., a list of numbers of design points and a number of error samples to use.
+        kernel_class : class
+            A class implementing a kernel.
+        target_class : class
+            A callable class implementing a target function to be interpolated.
+    """
+    def __init__(self, experiment_data=None, error_length=1):
+        self.experiment_data = experiment_data
+        self.error_length = error_length
+        self.errors       = None
+
+    @abstractmethod
+    def instantiate_kernel(self, input_dim):
+        """Instantiates the kernel for a given dimension dim. This method can be overriden for adaption to the specific interface of kernel_class."""
+        pass
+    
+    @abstractmethod
+    def instantiate_target(self, input_dim, output_dim):
+        """Instantiates the target for a given dimension dim. This method can be overriden for adaption to the specific interface of target_class."""
+        pass
+
+    @abstractmethod
+    def determine_output_dim(self, input_dim):
+        """ Returns an output dimension based on input_dim. """
+        pass
+
+    @abstractmethod
+    def compute_error(self, interpolants, input_dim):
+        """ Computes an error of length error_length for each interpolant in interpolants. """
+        pass
+
+    @abstractmethod
+    def construct_design(self, n, dim):
+        """ 
+        The implementation should return an indexable collection of design points. The first index should be reserved for differentiation across different sets of design points. 
+        The second index selects a design points, while the the third index selects a design point's component. The sets of design points do not necessarily have to be of the same length.
+        """
+        pass
+
+    def construct_interpolant(self, xdesigns, input_dim):
+        timestamp = time.time()
+        print("\t\tBuilding interpolants.")
+
+        output_dim = self.determine_output_dim(input_dim)
+        num_designs = len(xdesigns)
+        interpolants = np.empty((num_designs, output_dim), dtype=KernelInterpolant)
+
+        # decide on parallelism
+        if self.output_dim*num_designs > 0.7*cpu_count():
+            # process-level parallelism
+            N_PROCESSES = cpu_count()
+            threadlimit = 1
+        else:
+            # thread-level parallelism
+            N_PROCESSES = 1
+            threadlimit = cpu_count()
+        task_queue = Queue()
+        done_queue = Queue()
+        def evaluate_target(target, kernel, xdesign, idx_design_set, **kwargs):
+            ydesign = target(xdesign, **kwargs)
+            return ydesign, idx_design_set
+        def interpolate(target, kernel, xdesign, ydesign, idx_design_set, idx_outdim, **kwargs):
+            interpolant = KernelInterpolant(kernel, kernel.d, xdesign, ydesign)
+            interpolant.build_interpolant(**kwargs)
+            return interpolant, idx_design_set, idx_outdim
+        processes = []
+        TASKS = [(evaluate_target, (xdesign, idx_design_set)) for (idx_design_set, xdesign) in enumerate(xdesigns)]
+        for task in TASKS:
+            task_queue.put(task)
+        for n in range(N_PROCESSES):
+            processes.append(Process(target=self.parallel_worker_interpolate, args=(task_queue, done_queue, input_dim, threadlimit)))
+            processes[-1].start()
+        for task in TASKS:
+            ydesign, idx_design_set = done_queue.get()
+            for idx_outdim in range(output_dim):
+                task_queue.put((interpolate, (xdesigns[idx_design_set], ydesign[:,idx_outdim], idx_design_set, idx_outdim)))
+        for idx_design_set, idx_outdim in itertools.product(range(num_designs), range(output_dim)):
+            interpolant, idx_design_set, idx_outdim = done_queue.get()
+            interpolants[idx_design_set, idx_outdim] = interpolant
+        for process in processes:
+            task_queue.put('STOP')
+        for process in processes:
+            process.join()
+
+        print(f"\t\tBuilt interpolants with {(time.time() - timestamp):.1f}s runtime.")
+        return interpolants
+
+    def parallel_worker_interpolate(self, input, output, input_dim, threadlimit):
+        target = self.instantiate_target(input_dim)
+        kernel = self.instantiate_kernel(input_dim)
+        kwargs = {'threadlimit':threadlimit}
+        for func, args in iter(input.get, 'STOP'):
+            args = (target, kernel) + args
+            result = func(*args, **kwargs)
+            output.put(result)
+
+    def run_experiment(self):
+        # preparation
+        exp_data            = self.experiment_data
+        dim_list            = exp_data.get('dim_list')
+        Ndesign_list = exp_data.get('Ndesign_list')
+        self.errors = np.empty((len(dim_list), len(Ndesign_list), self.error_length))
+        # experiment logic
+        for input_dim in dim_list:
+            for n in Ndesign_list:
+                design = self.construct_design(n, input_dim)
+                interpolants = self.construct_interpolant(design, input_dim)
+                self.errors[input_dim, n] = self.compute_error(interpolants)
+
+    def obtain_result(self):
+        """
+        Copies errors into experiment_data and returns the latter.
+        
+        This function may be overridden for the users requirements when deriving a subclass.
+        """
+        self.experiment_data["error_data"] = self.errors
+        return self.experiment_data
+
+
+
+class Experiment_FEMWeightedNorm(AbstractExperiment):
+    r"""
+    Implements an experiment for the interpolation of finite element solutions of the PDE-class EllipticProblemFE.
+
+    Two error criteria are computed: \sqrt{\int_{[0,1]^s} ||u_sh - u_shn||^2} where || \cdot || is the weighted L2 or energy norm with weight function psi.
+
+    Attributes:
+        stochastic_transform: A string specifying the stochastic transform used for the coefficient function. This information also determines its type.
+    """
+    def __init__(self, experiment_data):
+        super.__init__(experiment_data, error_length=2)
+        self.type_design_points = experiment_data.get("type_design_points")
+        self.num_design_shifts = experiment_data.get("num_design_shifts")
+        # weights
+        weights_decay = experiment_data.get("weights_decay")
+        if isinstance(weights_decay, Number):
+            weights_decay = (weights_decay, weights_decay)
+        elif type(weights_decay) not in [tuple, list, np.ndarray]:
+            raise TypeError(  
+                'Type of weights_decay needs to be one of [tuple, list, np.ndarray]. Hint: It should contain a single number containing ' \
+                'the decay or a pair of two numbers, the first specifying the decay of weights in the problem and analogously the second ' \
+                'one in the method.'
+                )
+        self.product_weights_decay_target       = weights_decay[0]
+        self.product_weights_decay_interpolant  = weights_decay[1]        
+        # target
+        self.target_class = EllipticProblemFE
+        self.stochastic_transform = experiment_data.get("stochastic_transform")
+        self.meshsize = experiment_data.get("meshsize")
+        # kernel
+        if type(experiment_data["kernel_class"]) is str:
+            kernel_dict = {"UnanchoredSobolevKernel":UnanchoredSobolevKernel, "AnchoredSobolevKernel":AnchoredSobolevKernel}
+            kernel_name = experiment_data["kernel_class"]
+            experiment_data["kernel_class"] = kernel_dict[kernel_name]
+        self.kernel_class = experiment_data.get("kernel_class")
+
+    def instantiate_kernel(self, input_dim):
+        """Returns a kernel instance for a given dimension dim. This method can be overriden for adaption to the specific interface of kernel_class."""
+        # extract weights
+        # pass over weight to constructor of kernel class
+        q = self.product_weights_decay_interpolant
+        prod_weights = self.prod_weights(input_dim, q)
+        return self.kernel_class(input_dim, weights_dimension=prod_weights)
+
+    def instantiate_target(self, input_dim, output_dim):
+        """Returns a target instance for a given dimension dim. This method can be overriden for adaption to the specific interface of target_class."""
+        return EllipticProblemFE(input_dim, self.meshsize, self.stochastic_transform, f=lambda x: x[0], q=self.product_weights_decay_target)
+
+    def determine_output_dim(self, input_dim):
+        """Returns the output dimension of the target."""
+        return self.meshsize
+
+    @staticmethod
+    def b(j, c, q):
+        a_min = 1-c/np.sqrt(6)*zeta(q)
+        return c*j**(-q)/(np.sqrt(6)*a_min)
+    
+    def prod_weights(self, dim, q):
+        c = EllipticProblemFE.c
+        p = 1/2.2
+        delta = 1e-6
+        sigma = 1
+        llambda = 1/(2/p - 1 - 2*sigma - 4*delta)
+        touchard_poly = get_touchard_polynomial(sigma)
+        return [(((j*sigma)**sigma*touchard_poly(Experiment_FEMWeightedNorm.b(j, c, q)))**2/(2*np.exp(1/np.e)*zeta(2*llambda)))**(1/(1+llambda)) for j in range(1,dim+1)]
+
+    def construct_design(self, n : int, dim : int):
+        """
+        Returns a collection of self.num_design_shifts many sets of design points of the type self.type_design_points.
+        
+        The type self.type_design_points can be one of 'mc' (Monte Carlo), 'lattice' (QMC/lattice) and 'digital_net' (QMC/digital net).
+        The name self.num_design_shifts suggests that the code is used with lattices, but but several sets of design points could also 
+        be generated with digital nets and Monte Carlo points with different meanings (see qmcpy documentation for digital nets). 
+        Args:
+            n   : Number of points to construct. For lattices and digital nets, n must be a power of 2.
+            dim : Dimension of the points constructed.
+        Returns:
+            design : Array of design points. The first index differentiates sets of design points, the second index points and the third index components.
+        """
+        type_design_points = self.type_design_points.lower()
+        if type_design_points not in ['lattice', 'digital_net', 'mc']:
+            raise TypeError("Unknown type of design points. self.type_design_points must be one of ['lattice', 'digital_net', 'mc'].")
+        # lattice
+        if type_design_points == 'lattice':
+            lattice = qmcpy.Lattice(dimension=dim, replications=self.num_design_shifts)
+            design = lattice(n)
+        # digital net
+        elif type_design_points == 'digital_net':
+            digital_net = qmcpy.DigitalNetB2(dimension=dim, replications=self.num_design_shifts)
+            design = digital_net(n)
+        # monte carlo
+        elif type_design_points == 'mc':
+            rng = np.random.default_rng()
+            design = rng.uniform(0, 1, size=(self.num_design_shifts, n, dim))
+        return design
+
+    @staticmethod
+    def psi(y, alpha):
+        """
+        Product weight function psi(y) = prod_j exp(-alpha_j * |y_j|) = exp(-sum_j alpha_j * |y_j|). Intended for a weighted function norm on the stochastic domain.
+
+        Args:
+            y     : array of shape (n, s), row i is a point in R^s
+            alpha : array of shape (s,), with 0 < alpha_min <= alpha_j <= alpha_max
+        Returns: array of shape (n,)
+        """
+        y = np.asarray(y, dtype=float)
+        alpha = np.asarray(alpha, dtype=float)
+        return np.exp(-np.abs(y) @ alpha)
+
+    def compute_error(self, interpolants, input_dim):
+        """Computes an error of length error_length for each interpolant in interpolants.
+        
+        References:
+            [1] Graham, I.G., Kuo, F.Y., Nichols, J.A., Scheichl, R., Schwab, Ch., Sloan, I.H.: Quasi-Monte Carlo finite element methods for 
+                elliptic PDEs with lognormal random coefficients. Numer. Math. 131, 329-368 (2015)
+        """
+        # generate qmc points sets. one for each error shift
+        num_design_shifts = self.num_design_shifts
+        num_error_shifts = self.num_error_shifts
+        num_error_samples = 2**int(self.experiment_data.get("error_samples"))
+        errsample_point_sets = qmcpy.Lattice(dimension=input_dim, replications=self.num_error_shifts)(num_error_samples, warn=False)
+        # choose alpha for weighted norm according to [1, Chapter 4]
+        c = EllipticProblemFE.c
+        q = self.product_weights_decay_target
+        b = np.array([c*j**(-q)] for j in range(1, input_dim+1))
+        alpha = np.max(b, 0.01*np.ones_like(gamma))
+        # prepare parallel computing
+        processes = []
+        task_queue = Queue()
+        done_queue = Queue()
+        def qmc_worker(input, output):
+            target = self.instantiate_target(input_dim, self.determine_output_dim(input_dim))
+            for interpolants, errsample_point_subset in iter(input.get, 'STOP'):
+                # evaluate interpolants to obtain degree of freedom vectors
+                dofs_interp = np.empty((len(errsample_point_subset), len(interpolants)))
+                for idx, interpolant in enumerate(interpolants):
+                    dofs_interp[:,idx] = interpolant(errsample_point_subset)
+                sum_L2_err_local = 0
+                sum_energy_err_local = 0
+                # compute errors to FEM solutions
+                for idx, point in enumerate(errsample_point_subset):
+                    L2_err, energy_err = target.error_to_fem(point, dofs_interp[idx,:],threadlimit=1)
+                    sum_L2_err_local += self.psi(point, alpha)*L2_err
+                    sum_energy_err_local += self.psi(point, alpha)*energy_err
+                output.put(sum_L2_err_local, sum_energy_err_local)
+        N_PROCESSES = cpu_count()
+        for i in range(N_PROCESSES):
+            processes.append(Process(target=qmc_worker, args = (task_queue, done_queue)))
+        # allocate
+        Qsa_L2      = np.zeros(num_design_shifts) # shift-average QMC rules
+        Qsa_energy  = np.zeros(num_design_shifts)
+        Q_L2     = np.zeros(num_error_shifts)     # QMC rules
+        Q_energy = np.zeros(num_error_shifts)
+        L2_local_sums = np.zeros(N_PROCESSES)     # a worker's contribution to a QMC rule
+        energy_local_sums = np.zeros(N_PROCESSES) # is stored here
+        # compute
+        for des_shift in range(num_design_shifts):
+            for err_shift in range(num_error_shifts):
+                # apply qmc rule
+                errsample_point_set = errsample_point_sets[err_shift]
+                errsample_point_subsets = np.array_split(errsample_point_set, N_PROCESSES)
+                for i in range(N_PROCESSES):
+                    task_queue.put(interpolants[des_shift,:], errsample_point_subsets[i])        
+                for i in range(N_PROCESSES):
+                    L2_local_sums[i], energy_local_sums[i] = done_queue.get()
+                # compute shift-average QMC rule
+                Q_L2[err_shift] = np.sum(L2_local_sums)/num_error_samples
+                Q_energy[err_shift] = np.sum(energy_local_sums)/num_error_samples
+            Qsa_L2[des_shift]     = np.mean(Q_L2)
+            Qsa_energy[des_shift] = np.mean(Q_energy)
+        # compute design-shift-averages of the QMC-estimated error norms
+        L2_desshift_avg     = np.mean(Q_L2_errshift_avg)
+        energy_desshift_avg = np.mean(Q_energy_errshift_avg)
+        return L2_desshift_avg, energy_desshift_avg
+
 
 
 def interpolate(test_function, kernel, Ndesign, num_design_shifts, type_design_points='lattice'):
@@ -400,7 +710,7 @@ def run_feminterpolation_experiment(exp_data):
     meshsize = exp_data.get('meshsize', 10)
     if isinstance(weights_decay, Number):
         weights_decay = (weights_decay, weights_decay)
-    elif type(weights_decay) not in [tuple, list, np.array]:
+    elif type(weights_decay) not in [tuple, list, np.ndarray]:
         TypeError('weights_decay has to be a number or a tuple/list/np.array of two numbers')
     error_samples = 2**10
     stochastic_transform_name = exp_data.get('stochastic_transform', 'uniform').lower()
