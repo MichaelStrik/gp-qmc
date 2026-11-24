@@ -231,6 +231,8 @@ class EllipticProblemFE:
         [1] Kaarnioja, V., Kazashi, Y., Kuo, F.Y., Nobile, F., Sloan, I.H.: Fast approximation by periodic kernel-based lattice-point interpolation with 
             application in uncertainty quantification. Numer. Math. 150, 33–77 (2022).
     """
+    c = 0.2 # constant entering the diffusion coefficient, see a_diff_fun and [1]
+
     def __init__(self, ydim, Nx, coefficients_type="uniform", f = lambda x: x[0], q=4/3):
         # spaces
         domain = mesh.create_unit_interval(MPI.COMM_SELF, Nx-1)
@@ -279,12 +281,10 @@ class EllipticProblemFE:
         self.u_err  = fem.Function(V)
         self.L2error_form = fem.form(ufl.inner(self.u_err, self.u_err)*ufl.dx)
         self.energy_error_form= fem.form(self.a_diff*ufl.dot(ufl.grad(self.u_err), ufl.grad(self.u_err)) * ufl.dx)
-        #
-        self.c = 0.2 # constant entering the diffusion coefficient, see a_diff_fun and [1]
 
     # fem solver
     def a_diff_fun(self, x, y):
-        c = self.c
+        c = EllipticProblemFE.c
         q = self.q
         dim = self.dim
         def eta(x, j, c, q):
