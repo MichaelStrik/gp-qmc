@@ -226,6 +226,11 @@ class EllipticProblemQOI:
 
 
 class EllipticProblemFE:
+    """
+    References:
+        [1] Kaarnioja, V., Kazashi, Y., Kuo, F.Y., Nobile, F., Sloan, I.H.: Fast approximation by periodic kernel-based lattice-point interpolation with 
+            application in uncertainty quantification. Numer. Math. 150, 33–77 (2022).
+    """
     def __init__(self, ydim, Nx, coefficients_type="uniform", f = lambda x: x[0], q=4/3):
         # spaces
         domain = mesh.create_unit_interval(MPI.COMM_SELF, Nx-1)
@@ -260,27 +265,29 @@ class EllipticProblemFE:
             raise TypeError("Coefficient type not known.")
         # define variational form
         # functions
-        self.c = fem.Function(V) # spatially varying coefficient function
+        self.a_diff = fem.Function(V) # spatially varying diffusion coefficient
         self.u = ufl.TrialFunction(V)
         self.v = ufl.TestFunction(V)
         self.f_ufl = fem.Function(V)
         self.f_ufl.interpolate(self.f)
         # formulation
-        self.a = self.c*ufl.dot(ufl.grad(self.u), ufl.grad(self.v)) * ufl.dx
+        self.a = self.a_diff*ufl.dot(ufl.grad(self.u), ufl.grad(self.v)) * ufl.dx
         self.L = self.f_ufl * self.v * ufl.dx
         # error computation
         self.u_h    = fem.Function(V) # fem solution
         self.u_hn   = fem.Function(V) # surrogate/interpolated solution
         self.u_err  = fem.Function(V)
         self.L2error_form = fem.form(ufl.inner(self.u_err, self.u_err)*ufl.dx)
-        self.energy_error_form= fem.form(self.c*ufl.dot(ufl.grad(self.u_err), ufl.grad(self.u_err)) * ufl.dx)
+        self.energy_error_form= fem.form(self.a_diff*ufl.dot(ufl.grad(self.u_err), ufl.grad(self.u_err)) * ufl.dx)
+        #
+        self.c = 0.2 # constant entering the diffusion coefficient, see a_diff_fun and [1]
 
     # fem solver
-    def c_fun(self, x, y):
-        c = 0.2
+    def a_diff_fun(self, x, y):
+        c = self.c
         q = self.q
         dim = self.dim
-        def psi(x, j, c, q): # c isn't related to c_fun, this is not a good naming but the constant doesn't appear in a lot of places
+        def psi(x, j, c, q):
             return c*j**(-q)*np.sin(j*np.pi*x[0])
         diffusion = 1
         for j in range(1,dim+1):
@@ -309,7 +316,7 @@ class EllipticProblemFE:
     def solve(self, y):
         # compute coefficients
         y = self.transform(y)
-        self.c.interpolate(lambda x: self.c_fun(x,y))
+        self.a_diff.interpolate(lambda x: self.a_diff_fun(x,y))
 
         # assemble & solve
         problem = LinearProblem(
