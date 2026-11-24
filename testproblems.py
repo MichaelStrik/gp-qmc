@@ -287,14 +287,14 @@ class EllipticProblemFE:
         c = self.c
         q = self.q
         dim = self.dim
-        def psi(x, j, c, q):
+        def eta(x, j, c, q):
             return c*j**(-q)*np.sin(j*np.pi*x[0])
-        diffusion = 1
+        a_star = 1
         for j in range(1,dim+1):
-            diffusion += y[j-1]*psi(x,j,c,q)
+            a_y += y[j-1]*eta(x,j,c,q)
         if self.transform == "lognormal":
-            return np.exp(diffusion)
-        return diffusion
+            return np.exp(a_y)
+        return a_star + a_y
     
     @staticmethod
     def transform_uniform(y):
@@ -304,14 +304,9 @@ class EllipticProblemFE:
     def transform_arcsine(y):
         return 1/np.sqrt(6)*np.sin(2*np.pi*y)
     
-    @staticmethod
-    def transform_normal(y, mu=0.0, sigma=1.0):
-        X = Normal(mu=mu,sigma=sigma)
+    def transform_normal(self, y):
+        X = Normal(mu=0,sigma=1)
         return X.icdf(y)
-
-    def set_lognormal_parameters(self, mu, sigma):
-        self.mu_lognormal = mu
-        self.sigma_lognormal = sigma
     
     def solve(self, y):
         # compute coefficients
@@ -342,7 +337,7 @@ class EllipticProblemFE:
 
         return L2error, energy_error
 
-    def __call__(self, y):
+    def __call__(self, y, threadlimit=cpu_count()):
         if y.ndim == 1:
             y = y[np.newaxis,:]
             y_rows = 1
@@ -359,7 +354,7 @@ class EllipticProblemFE:
                 sol = elliptic_problem.solve(y)
                 coefficients = np.array(sol.x)
                 output.put((row_idx, coefficients))
-        N_PROCESSES = cpu_count()
+        N_PROCESSES = min(cpu_count(),threadlimit)
         task_queue = Queue()
         done_queue = Queue()
         processes = []
@@ -379,7 +374,7 @@ class EllipticProblemFE:
 
         return fem_coefficients
 
-    
+
 
 if __name__ == '__main__':
     # visuals
