@@ -68,15 +68,12 @@ class AbstractExperiment(ABC):
         pass
 
     def construct_interpolant(self, xdesigns, input_dim):
-        timestamp = time.time()
-        print("\t\tBuilding interpolants.")
-
         output_dim = self.determine_output_dim(input_dim)
         num_designs = len(xdesigns)
         interpolants = np.empty((num_designs, output_dim), dtype=KernelInterpolant)
 
         # decide on parallelism
-        if self.output_dim*num_designs > 0.7*cpu_count():
+        if output_dim*num_designs > 0.7*cpu_count():
             # process-level parallelism
             N_PROCESSES = cpu_count()
             threadlimit = 1
@@ -111,12 +108,10 @@ class AbstractExperiment(ABC):
             task_queue.put('STOP')
         for process in processes:
             process.join()
-
-        print(f"\t\tBuilt interpolants with {(time.time() - timestamp):.1f}s runtime.")
         return interpolants
 
     def parallel_worker_interpolate(self, input, output, input_dim, threadlimit):
-        target = self.instantiate_target(input_dim)
+        target = self.instantiate_target(input_dim, self.determine_output_dim(input_dim))
         kernel = self.instantiate_kernel(input_dim)
         kwargs = {'threadlimit':threadlimit}
         for func, args in iter(input.get, 'STOP'):
@@ -132,10 +127,16 @@ class AbstractExperiment(ABC):
         self.errors = np.empty((len(dim_list), len(Ndesign_list), self.error_length))
         # experiment logic
         for input_dim in dim_list:
+            print(f"\tdim {input_dim}")
             for n in Ndesign_list:
+                print(f"\t\tn {n}")
                 design = self.construct_design(n, input_dim)
+                timestamp=time.time()
                 interpolants = self.construct_interpolant(design, input_dim)
-                self.errors[input_dim, n] = self.compute_error(interpolants)
+                print(f"\t\tBuilt interpolants after {(time.time() - timestamp):.1f}s.")
+                timestamp=time.time()
+                self.errors[input_dim, n] = self.compute_error(interpolants, input_dim)
+                print(f"\t\tSampled errors after {(time.time() - timestamp):.1f}s.")
 
     def obtain_result(self):
         """
@@ -158,7 +159,7 @@ class Experiment_FEMWeightedNorm(AbstractExperiment):
         stochastic_transform: A string specifying the stochastic transform used for the coefficient function. This information also determines its type.
     """
     def __init__(self, experiment_data):
-        super.__init__(experiment_data, error_length=2)
+        super().__init__(experiment_data, error_length=2)
         self.type_design_points = experiment_data.get("type_design_points")
         self.num_design_shifts = experiment_data.get("num_design_shifts")
         # weights
@@ -172,17 +173,20 @@ class Experiment_FEMWeightedNorm(AbstractExperiment):
                 'one in the method.'
                 )
         self.product_weights_decay_target       = weights_decay[0]
-        self.product_weights_decay_interpolant  = weights_decay[1]        
+        self.product_weights_decay_interpolant  = weights_decay[1]
         # target
         self.target_class = EllipticProblemFE
         self.stochastic_transform = experiment_data.get("stochastic_transform")
         self.meshsize = experiment_data.get("meshsize")
-        # kernel
+        # interpolants
         if type(experiment_data["kernel_class"]) is str:
             kernel_dict = {"UnanchoredSobolevKernel":UnanchoredSobolevKernel, "AnchoredSobolevKernel":AnchoredSobolevKernel}
             kernel_name = experiment_data["kernel_class"]
             experiment_data["kernel_class"] = kernel_dict[kernel_name]
         self.kernel_class = experiment_data.get("kernel_class")
+        # error
+        self.num_design_shifts  = experiment_data.get("num_design_shifts")
+        self.num_error_shifts   = experiment_data.get("num_error_shifts")
 
     def instantiate_kernel(self, input_dim):
         """Returns a kernel instance for a given dimension dim. This method can be overriden for adaption to the specific interface of kernel_class."""
@@ -273,8 +277,8 @@ class Experiment_FEMWeightedNorm(AbstractExperiment):
         # choose alpha for weighted norm according to [1, Chapter 4]
         c = EllipticProblemFE.c
         q = self.product_weights_decay_target
-        b = np.array([c*j**(-q)] for j in range(1, input_dim+1))
-        alpha = np.max(b, 0.01*np.ones_like(b))
+        b = np.array([c*j**(-q) for j in range(1, input_dim+1)])
+        alpha = np.maximum(b, 0.01*np.ones_like(b))
         # prepare parallel computing
         processes = []
         task_queue = Queue()
@@ -311,7 +315,7 @@ class Experiment_FEMWeightedNorm(AbstractExperiment):
                 errsample_point_set = errsample_point_sets[err_shift]
                 errsample_point_subsets = np.array_split(errsample_point_set, N_PROCESSES)
                 for i in range(N_PROCESSES):
-                    task_queue.put(interpolants[des_shift,:], errsample_point_subsets[i])        
+                    task_queue.put((interpolants[des_shift,:], errsample_point_subsets[i]))
                 for i in range(N_PROCESSES):
                     L2_local_sums[i], energy_local_sums[i] = done_queue.get()
                 # compute shift-average QMC rule
@@ -324,6 +328,11 @@ class Experiment_FEMWeightedNorm(AbstractExperiment):
         energy_desshift_avg = np.mean(Qsa_energy)
         return L2_desshift_avg, energy_desshift_avg
 
+
+def run_feminterpolation_experiment_new(exp_data):
+    experiment = Experiment_FEMWeightedNorm(exp_data)
+    experiment.run_experiment()
+    return experiment.obtain_result()
 
 
 def interpolate(test_function, kernel, Ndesign, num_design_shifts, type_design_points='lattice'):
