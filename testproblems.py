@@ -233,7 +233,7 @@ class EllipticProblemFE:
     """
     c = 0.2 # constant entering the diffusion coefficient, see a_diff_fun and [1]
 
-    def __init__(self, ydim, Nx, coefficients_type="uniform", f = lambda x: x[0], q=4/3):
+    def __init__(self, dim, Nx, coefficients_type="uniform", f = lambda x: x[0], q=4/3):
         # spaces
         domain = mesh.create_unit_interval(MPI.COMM_SELF, Nx-1)
         V = fem.functionspace(domain, ("Lagrange", 1))
@@ -246,7 +246,7 @@ class EllipticProblemFE:
         boundary_dofs = fem.locate_dofs_topological(V, fdim, boundary_facets)
         bc = fem.dirichletbc(uD, boundary_dofs, V)
         # class attributes
-        self.dim = ydim
+        self.dim = dim
         self.f = f
         self.q = q
         self.domain = domain
@@ -289,7 +289,8 @@ class EllipticProblemFE:
         dim = self.dim
         def eta(x, j, c, q):
             return c*j**(-q)*np.sin(j*np.pi*x[0])
-        a_star = 1
+        a_star  = 1.0
+        a_y     = 0.0
         for j in range(1,dim+1):
             a_y += y[j-1]*eta(x,j,c,q)
         if self.transform == "lognormal":
@@ -344,7 +345,7 @@ class EllipticProblemFE:
             y_cols = y.shape[1]
         elif y.ndim==2:
             y_rows, y_cols = y.shape
-        assert y_cols == self.ydim
+        assert y_cols == self.dim
         
         fem_coefficients = np.zeros((y_rows, self.Nx))
 
