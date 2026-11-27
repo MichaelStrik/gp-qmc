@@ -274,7 +274,7 @@ class Experiment_FEMWeightedNorm(AbstractExperiment):
         c = EllipticProblemFE.c
         q = self.product_weights_decay_target
         b = np.array([c*j**(-q)] for j in range(1, input_dim+1))
-        alpha = np.max(b, 0.01*np.ones_like(gamma))
+        alpha = np.max(b, 0.01*np.ones_like(b))
         # prepare parallel computing
         processes = []
         task_queue = Queue()
@@ -320,8 +320,8 @@ class Experiment_FEMWeightedNorm(AbstractExperiment):
             Qsa_L2[des_shift]     = np.mean(Q_L2)
             Qsa_energy[des_shift] = np.mean(Q_energy)
         # compute design-shift-averages of the QMC-estimated error norms
-        L2_desshift_avg     = np.mean(Q_L2_errshift_avg)
-        energy_desshift_avg = np.mean(Q_energy_errshift_avg)
+        L2_desshift_avg     = np.mean(Qsa_L2)
+        energy_desshift_avg = np.mean(Qsa_energy)
         return L2_desshift_avg, energy_desshift_avg
 
 
